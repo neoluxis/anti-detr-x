@@ -5,7 +5,7 @@ import torch.nn.functional as F
 from einops import rearrange
 
 
-__all__ = ['TransformerEncoderLayer_DHSA']
+__all__ = ['HIFI']
 
 
 # TransformerEncoderLayer_LocalWindowAttention
@@ -62,7 +62,6 @@ class Conv2d_BN(torch.nn.Sequential):
         return m
 
 
-# TransformerEncoderLayer-Dynamic-range Histogram Self-Attention
 class Attention_histogram(nn.Module):
     def __init__(self, dim, num_heads=8, bias=False, ifBox=True):
         super(Attention_histogram, self).__init__()
@@ -144,7 +143,7 @@ class Attention_histogram(nn.Module):
         return out
 
 
-class TransformerEncoderLayer_DHSA(nn.Module):
+class HIFI(nn.Module):
     """Defines a single layer of the transformer encoder."""
 
     def __init__(self, c1, cm=2048, num_heads=8, dropout=0.0, act=nn.GELU(), normalize_before=False):
