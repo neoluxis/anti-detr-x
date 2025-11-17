@@ -1,8 +1,8 @@
 # Ultralytics YOLO 🚀, AGPL-3.0 license
 
 path: D:/Project/Algorithm/datasets/UAV # dataset root dir
-train: images/train # train images (relative to 'path')  6471 images
-val: images/val # val images (relative to 'path')  548 images
+train: images/train
+val: images/val
 
 # Classes
 names:
