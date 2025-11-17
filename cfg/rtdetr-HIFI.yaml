@@ -6,8 +6,7 @@ nc: 80  # number of classes
 scales: # model compound scaling constants, i.e. 'model=yolov8n-cls.yaml' will call yolov8-cls.yaml with scale 'n'
   # [depth, width, max_channels]
   l: [1.00, 1.00, 1024]
-
-# From BiliBili 魔鬼面具
+  
 backbone:
   # [from, repeats, module, args]
   - [-1, 1, ConvNormLayer, [32, 3, 2, None, False, 'relu']] # 0-P1/2
@@ -23,7 +22,7 @@ backbone:
 
 head:
   - [-1, 1, Conv, [256, 1, 1, None, 1, 1, False]]  # 8 input_proj.2
-  - [-1, 1, TransformerEncoderLayer_DHSA, [1024, 8]] # 9
+  - [-1, 1, HIFI, [1024, 8]] # 9
   - [-1, 1, Conv, [256, 1, 1]]  # 10, Y5, lateral_convs.0
 
   - [-1, 1, nn.Upsample, [None, 2, 'nearest']] # 11
