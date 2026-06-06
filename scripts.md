@@ -48,3 +48,14 @@ uv run util/dataset/cst2yolo.py --cst_dir datasets/CST_AntiUAV/CST-AntiUAV \
 uv run scripts/train_yolo.py
 ```
 
+也可以直接命令行传参，或者放在后台任务运行
+
+## DETR 系列训练
+
+修改 `scripts/train_detr.py` 后运行
+
+```bash
+uv run scripts/train_detr.py
+```
+也可以直接命令行传参，或者放在后台任务运行
+
