@@ -1,0 +1,15 @@
+*.pdf
+*.pt
+*.lnk
+
+runs/
+
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+.env
+
+uv.lock
+

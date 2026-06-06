@@ -346,9 +346,6 @@ class WTConv2d(nn.Module):
         self.wt_filter = nn.Parameter(self.wt_filter, requires_grad=False)
         self.iwt_filter = nn.Parameter(self.iwt_filter, requires_grad=False)
 
-        self.wt_function = wavelet_transform_init(self.wt_filter)
-        self.iwt_function = inverse_wavelet_transform_init(self.iwt_filter)
-
         self.base_conv = nn.Conv2d(in_channels, in_channels, kernel_size, padding='same', stride=1, dilation=1,
                                    groups=in_channels, bias=bias)
         self.base_scale = _ScaleModule([1, in_channels, 1, 1])
@@ -363,10 +360,17 @@ class WTConv2d(nn.Module):
 
         if self.stride > 1:
             self.stride_filter = nn.Parameter(torch.ones(in_channels, 1, 1, 1), requires_grad=False)
-            self.do_stride = lambda x_in: F.conv2d(x_in, self.stride_filter.to(x_in.device), bias=None,
-                                                   stride=self.stride, groups=in_channels)
         else:
-            self.do_stride = None
+            self.register_parameter("stride_filter", None)
+
+    def _do_stride(self, x):
+        return F.conv2d(
+            x,
+            self.stride_filter.to(device=x.device, dtype=x.dtype),
+            bias=None,
+            stride=self.stride,
+            groups=self.in_channels,
+        )
 
     def forward(self, x):
 
@@ -383,7 +387,7 @@ class WTConv2d(nn.Module):
                 curr_pads = (0, curr_shape[3] % 2, 0, curr_shape[2] % 2)
                 curr_x_ll = F.pad(curr_x_ll, curr_pads)
 
-            curr_x = self.wt_function(curr_x_ll)
+            curr_x = WaveletTransform.apply(curr_x_ll, self.wt_filter)
             curr_x_ll = curr_x[:, :, 0, :, :]
 
             shape_x = curr_x.shape
@@ -404,7 +408,7 @@ class WTConv2d(nn.Module):
             curr_x_ll = curr_x_ll + next_x_ll
 
             curr_x = torch.cat([curr_x_ll.unsqueeze(2), curr_x_h], dim=2)
-            next_x_ll = self.iwt_function(curr_x)
+            next_x_ll = InverseWaveletTransform.apply(curr_x, self.iwt_filter)
 
             next_x_ll = next_x_ll[:, :, :curr_shape[2], :curr_shape[3]]
 
@@ -414,8 +418,8 @@ class WTConv2d(nn.Module):
         x = self.base_scale(self.base_conv(x))
         x = x + x_tag
 
-        if self.do_stride is not None:
-            x = self.do_stride(x)
+        if self.stride > 1:
+            x = self._do_stride(x)
 
         return x
 
