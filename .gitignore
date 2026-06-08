@@ -13,3 +13,5 @@ __pycache__/
 
 uv.lock
 
+datasets
+datasets.yaml

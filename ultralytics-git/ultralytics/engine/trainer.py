@@ -451,6 +451,17 @@ class BaseTrainer:
                         self.loss = loss.sum()
                         if RANK != -1:
                             self.loss *= self.world_size
+
+                        finite_loss = torch.isfinite(self.loss).all()
+                        finite_items = torch.isfinite(self.loss_items).all()
+                        if not (finite_loss and finite_items):
+                            LOGGER.warning(
+                                f"Non-finite loss detected at epoch {epoch + 1}, batch {i + 1}; "
+                                "skipping optimizer step for this batch."
+                            )
+                            self.optimizer.zero_grad()
+                            continue
+
                         self.tloss = (
                             self.loss_items if self.tloss is None else (self.tloss * i + self.loss_items) / (i + 1)
                         )
