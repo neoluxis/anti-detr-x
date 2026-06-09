@@ -10,14 +10,19 @@ from torch.autograd import Function
 __all__ = (
     "Attention_histogram",
     "BasicBlock",
+    "BasicBlock_DGWRN",
     "BasicBlock_WTConv",
+    "BiAGCAUBlock",
     "BottleNeck",
     "BottleNeck_WTConv",
     "Blocks",
     "Conv2d_BN",
     "ConvNormLayer",
+    "DynamicWTConv2d",
     "HIFI",
     "LayerNorm",
+    "MDHIFI",
+    "SparseGlobalAttention",
     "WTConv2d",
 )
 
@@ -411,6 +416,41 @@ class HIFI(nn.Module):
         return self.forward_post(src, src_mask, src_key_padding_mask, pos)
 
 
+class _ChannelGate(nn.Module):
+    def __init__(self, channels, reduction=4):
+        super().__init__()
+        hidden = max(channels // reduction, 8)
+        self.pool = nn.AdaptiveAvgPool2d(1)
+        self.net = nn.Sequential(
+            nn.Conv2d(channels, hidden, 1, bias=True),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(hidden, channels, 1, bias=True),
+            nn.Sigmoid(),
+        )
+
+    def forward(self, x):
+        return x * self.net(self.pool(x))
+
+
+class SparseGlobalAttention(nn.Module):
+    def __init__(self, c1, reduction=4, mask_kernel=7):
+        super().__init__()
+        padding = mask_kernel // 2
+        self.channel_gate = _ChannelGate(c1, reduction=reduction)
+        self.spatial_gate = nn.Sequential(
+            nn.Conv2d(2, 1, mask_kernel, padding=padding, bias=False),
+            nn.Sigmoid(),
+        )
+        self.proj = nn.Conv2d(c1, c1, 1, bias=False)
+
+    def forward(self, x):
+        avg_map = x.mean(dim=1, keepdim=True)
+        max_map = x.amax(dim=1, keepdim=True)
+        spatial_mask = self.spatial_gate(torch.cat([avg_map, max_map], dim=1))
+        x = self.channel_gate(x)
+        return self.proj(x * spatial_mask)
+
+
 def create_wavelet_filter(wave, in_size, out_size, type=torch.float):
     if wave != "db1":
         raise NotImplementedError("Anti-DETR WTConv2d currently supports only the db1 wavelet.")
@@ -525,9 +565,9 @@ class WTConv2d(nn.Module):
         self.stride = stride
         self.dilation = 1
 
-        self.wt_filter, self.iwt_filter = create_wavelet_filter(wt_type, in_channels, in_channels, torch.float)
-        self.wt_filter = nn.Parameter(self.wt_filter, requires_grad=False)
-        self.iwt_filter = nn.Parameter(self.iwt_filter, requires_grad=False)
+        wt_filter, iwt_filter = create_wavelet_filter(wt_type, in_channels, in_channels, torch.float)
+        self.register_buffer("wt_filter", wt_filter, persistent=True)
+        self.register_buffer("iwt_filter", iwt_filter, persistent=True)
 
         self.base_conv = nn.Conv2d(
             in_channels,
@@ -561,9 +601,9 @@ class WTConv2d(nn.Module):
         )
 
         if self.stride > 1:
-            self.stride_filter = nn.Parameter(torch.ones(in_channels, 1, 1, 1), requires_grad=False)
+            self.register_buffer("stride_filter", torch.ones(in_channels, 1, 1, 1), persistent=True)
         else:
-            self.register_parameter("stride_filter", None)
+            self.stride_filter = None
 
     def _do_stride(self, x):
         return F.conv2d(
@@ -623,3 +663,221 @@ class WTConv2d(nn.Module):
             x = self._do_stride(x)
 
         return x
+
+
+class DynamicWTConv2d(WTConv2d):
+    def __init__(
+        self,
+        in_channels,
+        out_channels,
+        kernel_size=5,
+        stride=1,
+        bias=True,
+        wt_levels=1,
+        wt_type="db1",
+        gate_reduction=4,
+    ):
+        super().__init__(
+            in_channels,
+            out_channels,
+            kernel_size=kernel_size,
+            stride=stride,
+            bias=bias,
+            wt_levels=wt_levels,
+            wt_type=wt_type,
+        )
+        hidden = max(in_channels // gate_reduction, 8)
+        self.gate = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(in_channels, hidden, 1, bias=True),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(hidden, in_channels * 2, 1, bias=True),
+            nn.Sigmoid(),
+        )
+
+    def forward(self, x):
+        x_ll_in_levels = []
+        x_h_in_levels = []
+        shapes_in_levels = []
+
+        curr_x_ll = x
+
+        for level in range(self.wt_levels):
+            curr_shape = curr_x_ll.shape
+            shapes_in_levels.append(curr_shape)
+            if (curr_shape[2] % 2 > 0) or (curr_shape[3] % 2 > 0):
+                curr_pads = (0, curr_shape[3] % 2, 0, curr_shape[2] % 2)
+                curr_x_ll = F.pad(curr_x_ll, curr_pads)
+
+            curr_x = WaveletTransform.apply(curr_x_ll, self.wt_filter)
+            curr_x_ll = curr_x[:, :, 0, :, :]
+
+            shape_x = curr_x.shape
+            curr_x_tag = curr_x.reshape(shape_x[0], shape_x[1] * 4, shape_x[3], shape_x[4])
+            curr_x_tag = self.wavelet_scale[level](self.wavelet_convs[level](curr_x_tag))
+            curr_x_tag = curr_x_tag.reshape(shape_x)
+
+            x_ll_in_levels.append(curr_x_tag[:, :, 0, :, :])
+            x_h_in_levels.append(curr_x_tag[:, :, 1:4, :, :])
+
+        next_x_ll = 0
+
+        for level in range(self.wt_levels - 1, -1, -1):
+            curr_x_ll = x_ll_in_levels.pop()
+            curr_x_h = x_h_in_levels.pop()
+            curr_shape = shapes_in_levels.pop()
+
+            curr_x_ll = curr_x_ll + next_x_ll
+
+            curr_x = torch.cat([curr_x_ll.unsqueeze(2), curr_x_h], dim=2)
+            next_x_ll = InverseWaveletTransform.apply(curr_x, self.iwt_filter)
+            next_x_ll = next_x_ll[:, :, : curr_shape[2], : curr_shape[3]]
+
+        wavelet_out = next_x_ll
+        base_out = self.base_scale(self.base_conv(x))
+        wavelet_gate, base_gate = self.gate(x).chunk(2, dim=1)
+        x = wavelet_out * wavelet_gate + base_out * base_gate
+
+        if self.stride > 1:
+            x = self._do_stride(x)
+
+        return x
+
+
+class BasicBlock_DGWRN(BasicBlock):
+    def __init__(self, ch_in, ch_out, stride, shortcut, act="relu", variant="d"):
+        super().__init__(ch_in, ch_out, stride, shortcut, act, variant)
+        self.branch2b = DynamicWTConv2d(ch_out, ch_out)
+        self.sparse_attn = SparseGlobalAttention(ch_out)
+
+    def forward(self, x):
+        out = self.branch2a(x)
+        out = self.branch2b(out)
+        out = self.sparse_attn(out)
+        short = x if self.shortcut else self.short(x)
+        out = out + short
+        out = self.act(out)
+        return out
+
+
+class _AGCAUUnit(nn.Module):
+    def __init__(self, channels, dropout=0.0):
+        super().__init__()
+        self.local = ConvNormLayer(channels, channels, 3, 1, act="relu")
+        self.context = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(channels, channels, 1, bias=True),
+            nn.Sigmoid(),
+        )
+        self.align = nn.Sequential(
+            nn.Conv2d(channels, channels, 3, padding=1, groups=channels, bias=False),
+            nn.Conv2d(channels, channels, 1, bias=False),
+            nn.BatchNorm2d(channels),
+        )
+        self.dropout = nn.Dropout2d(dropout) if dropout > 0 else nn.Identity()
+
+    def forward(self, x):
+        local = self.local(x)
+        aligned = self.align(local)
+        gated = aligned * self.context(local)
+        return x + self.dropout(gated)
+
+
+class BiAGCAUBlock(nn.Module):
+    def __init__(self, c1, c2, n=3, e=1.0, num_heads=4, dropout=0.0):
+        super().__init__()
+        hidden = int(c2 * e)
+        self.top_down = ConvNormLayer(c1, hidden, 1, 1, act="relu")
+        self.bottom_up = ConvNormLayer(c1, hidden, 1, 1, act="relu")
+        self.top_path = nn.Sequential(*(_AGCAUUnit(hidden, dropout=dropout) for _ in range(n)))
+        self.bottom_path = nn.Sequential(*(_AGCAUUnit(hidden, dropout=dropout) for _ in range(n)))
+        self.cross_gate = nn.Sequential(
+            nn.Conv2d(hidden * 2, hidden, 1, bias=False),
+            nn.BatchNorm2d(hidden),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(hidden, hidden * 2, 1, bias=True),
+            nn.Sigmoid(),
+        )
+        self.fuse = ConvNormLayer(hidden * 2, c2, 1, 1, act="relu")
+        self.short = ConvNormLayer(c1, c2, 1, 1, act=None) if c1 != c2 else nn.Identity()
+        self.out_gate = SparseGlobalAttention(c2, reduction=max(num_heads, 1))
+
+    def forward(self, x):
+        td = self.top_path(self.top_down(x))
+        pooled = F.avg_pool2d(self.bottom_up(x), kernel_size=2, stride=2, ceil_mode=True)
+        bu = F.interpolate(self.bottom_path(pooled), size=td.shape[-2:], mode="nearest")
+        cross = self.cross_gate(torch.cat([td, bu], dim=1))
+        td_gate, bu_gate = cross.chunk(2, dim=1)
+        fused = torch.cat([td * td_gate, bu * bu_gate], dim=1)
+        out = self.fuse(fused)
+        return self.out_gate(out) + self.short(x)
+
+
+class MDHIFI(nn.Module):
+    def __init__(
+        self,
+        c1,
+        cm=2048,
+        num_heads=8,
+        grad_kernel=3,
+        texture_kernel=5,
+        noise_reduction=4,
+        dropout=0.0,
+        act=nn.GELU(),
+        normalize_before=False,
+    ):
+        super().__init__()
+        self.additivetoken = Attention_histogram(c1, num_heads)
+        self.edge_proj = nn.Conv2d(c1, c1, 1, bias=False)
+        self.texture_proj = nn.Conv2d(c1, c1, 1, bias=False)
+        self.texture_pool = nn.AvgPool2d(texture_kernel, stride=1, padding=texture_kernel // 2)
+        hidden = max(c1 // noise_reduction, 8)
+        self.noise_gate = nn.Sequential(
+            nn.Conv2d(c1 * 3, hidden, 1, bias=True),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(hidden, c1, 1, bias=True),
+            nn.Sigmoid(),
+        )
+        self.fc1 = nn.Conv2d(c1, cm, 1)
+        self.fc2 = nn.Conv2d(cm, c1, 1)
+        self.norm1 = LayerNorm(c1)
+        self.norm2 = LayerNorm(c1)
+        self.dropout = nn.Dropout(dropout)
+        self.dropout1 = nn.Dropout(dropout)
+        self.dropout2 = nn.Dropout(dropout)
+        self.act = act
+        self.normalize_before = normalize_before
+
+        sobel_x = torch.tensor([[1.0, 0.0, -1.0], [2.0, 0.0, -2.0], [1.0, 0.0, -1.0]], dtype=torch.float32)
+        sobel_y = torch.tensor([[1.0, 2.0, 1.0], [0.0, 0.0, 0.0], [-1.0, -2.0, -1.0]], dtype=torch.float32)
+        self.register_buffer("sobel_x", sobel_x.view(1, 1, grad_kernel, grad_kernel), persistent=False)
+        self.register_buffer("sobel_y", sobel_y.view(1, 1, grad_kernel, grad_kernel), persistent=False)
+
+    def _gradient_branch(self, x):
+        channels = x.shape[1]
+        weight_x = self.sobel_x.expand(channels, 1, -1, -1).to(dtype=x.dtype, device=x.device)
+        weight_y = self.sobel_y.expand(channels, 1, -1, -1).to(dtype=x.dtype, device=x.device)
+        grad_x = F.conv2d(x, weight_x, padding=1, groups=channels)
+        grad_y = F.conv2d(x, weight_y, padding=1, groups=channels)
+        grad = torch.sqrt(grad_x.square() + grad_y.square() + 1e-6)
+        return self.edge_proj(grad)
+
+    def _texture_branch(self, x):
+        pooled = self.texture_pool(x)
+        texture = torch.abs(x - pooled)
+        return self.texture_proj(texture)
+
+    def forward_post(self, src, src_mask=None, src_key_padding_mask=None, pos=None):
+        hist = self.additivetoken(src)
+        grad = self._gradient_branch(src)
+        texture = self._texture_branch(src)
+        gate = self.noise_gate(torch.cat([hist, grad, texture], dim=1))
+        src2 = hist + gate * (grad + texture)
+        src = src + self.dropout1(src2)
+        src = self.norm1(src)
+        src2 = self.fc2(self.dropout(self.act(self.fc1(src))))
+        src = src + self.dropout2(src2)
+        return self.norm2(src)
+
+    def forward(self, src, src_mask=None, src_key_padding_mask=None, pos=None):
+        return self.forward_post(src, src_mask, src_key_padding_mask, pos)

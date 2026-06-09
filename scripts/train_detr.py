@@ -49,6 +49,8 @@ if __name__ == "__main__":
         workers=args.workers,
         seed=args.seed,
         deterministic=args.deterministic,
+        mosaic=False,  ## 加速训练 4.5min/epoch -> 1min/epoch
+        mixup=False,   # Disable mixup augmentation for better small object detection
     )
 
     # os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True,max_split_size_mb:128")

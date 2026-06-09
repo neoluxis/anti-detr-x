@@ -15,7 +15,9 @@ from ultralytics.nn.modules import (
     AIFI,
     Attention_histogram,
     BasicBlock,
+    BasicBlock_DGWRN,
     BasicBlock_WTConv,
+    BiAGCAUBlock,
     C1,
     C2,
     C2PSA,
@@ -53,6 +55,7 @@ from ultralytics.nn.modules import (
     ConvNormLayer,
     ConvTranspose,
     Detect,
+    DynamicWTConv2d,
     DWConv,
     DWConvTranspose2d,
     Focus,
@@ -77,6 +80,8 @@ from ultralytics.nn.modules import (
     SemanticSegment,
     HIFI,
     LayerNorm,
+    MDHIFI,
+    SparseGlobalAttention,
     TorchVision,
     WTConv2d,
     WorldDetect,
@@ -1712,8 +1717,10 @@ def parse_model(d, ch, verbose=True):
             C2fAttn,
             C3,
             C3TR,
+            BiAGCAUBlock,
             C3Ghost,
             Blocks,
+            DynamicWTConv2d,
             WTConv2d,
             torch.nn.ConvTranspose2d,
             DWConvTranspose2d,
@@ -1735,6 +1742,7 @@ def parse_model(d, ch, verbose=True):
             C2fAttn,
             C3,
             C3TR,
+            BiAGCAUBlock,
             C3Ghost,
             C3x,
             RepC3,
@@ -1784,12 +1792,12 @@ def parse_model(d, ch, verbose=True):
                     args.extend((True, 1.2))
             if m is C2fCIB:
                 legacy = False
-        elif m in {Blocks, ConvNormLayer, WTConv2d}:
+        elif m in {Blocks, ConvNormLayer, WTConv2d, DynamicWTConv2d}:
             c2 = args[1]
             args = [ch[f], *args]
         elif m is AIFI:
             args = [ch[f], *args]
-        elif m is HIFI:
+        elif m in {HIFI, MDHIFI}:
             args = [ch[f], *args]
         elif m in frozenset({HGStem, HGBlock}):
             c1, cm, c2 = ch[f], args[0], args[1]
