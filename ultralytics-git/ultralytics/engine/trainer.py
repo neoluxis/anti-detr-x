@@ -11,6 +11,7 @@ from __future__ import annotations
 import gc
 import math
 import os
+import signal
 import subprocess
 import time
 import warnings
@@ -202,6 +203,9 @@ class BaseTrainer:
             self.csv.unlink()
         self.plot_idx = [0, 1, 2]
         self.nan_recovery_attempts = 0
+        self.stop = False
+        self._original_sigint_handler = None
+        self._sigint_received = False
 
     def add_callback(self, event: str, callback):
         """Append the given callback to the event's callback list."""
@@ -215,6 +219,33 @@ class BaseTrainer:
         """Run all existing callbacks associated with a particular event."""
         for callback in self.callbacks.get(event, []):
             callback(self)
+
+    def _handle_sigint(self, signum, frame):
+        """Convert the first SIGINT into a graceful stop so final validation and plots still run."""
+        if self._sigint_received:
+            raise KeyboardInterrupt
+
+        self._sigint_received = True
+        self.stop = True
+        if RANK in {-1, 0}:
+            LOGGER.warning(
+                "Received SIGINT, stopping after the current batch/epoch and running final validation/plot cleanup. "
+                "Press Ctrl+C again to abort immediately."
+            )
+
+    def _install_signal_handlers(self):
+        """Install temporary signal handlers used for graceful training shutdown."""
+        try:
+            self._original_sigint_handler = signal.getsignal(signal.SIGINT)
+            signal.signal(signal.SIGINT, self._handle_sigint)
+        except ValueError:
+            self._original_sigint_handler = None
+
+    def _restore_signal_handlers(self):
+        """Restore the original signal handlers after training finishes."""
+        if self._original_sigint_handler is not None:
+            signal.signal(signal.SIGINT, self._original_sigint_handler)
+            self._original_sigint_handler = None
 
     def train(self):
         """Execute the training process, using DDP subprocess for multi-GPU or direct training for single-GPU."""
@@ -375,234 +406,239 @@ class BaseTrainer:
 
     def _do_train(self):
         """Perform the full training loop including setup, epoch iteration, validation, and final evaluation."""
-        if self.world_size > 1:
-            self._setup_ddp()
-        self._setup_train()
+        self._install_signal_handlers()
+        try:
+            if self.world_size > 1:
+                self._setup_ddp()
+            self._setup_train()
 
-        nb = len(self.train_loader)  # number of batches
-        nw = max(round(self.args.warmup_epochs * nb), 100) if self.args.warmup_epochs > 0 else -1  # warmup iterations
-        last_opt_step = -1
-        self.epoch_time = None
-        self.epoch_time_start = time.time()
-        self.train_time_start = time.time()
-        self.run_callbacks("on_train_start")
-        LOGGER.info(
-            f"Image sizes {self.args.imgsz} train, {self.args.imgsz} val\n"
-            f"Using {self.train_loader.num_workers * (self.world_size or 1)} dataloader workers\n"
-            f"Logging results to {colorstr('bold', self.save_dir)}\n"
-            f"Starting training for " + (f"{self.args.time} hours..." if self.args.time else f"{self.epochs} epochs...")
-        )
-        if self.args.close_mosaic:
-            base_idx = (self.epochs - self.args.close_mosaic) * nb
-            self.plot_idx.extend([base_idx, base_idx + 1, base_idx + 2])
-        epoch = self.start_epoch
-        self.optimizer.zero_grad()  # zero any resumed gradients to ensure stability on train start
-        self._oom_retries = 0  # OOM auto-reduce counter for first epoch
-        while True:
-            self.epoch = epoch
-            self.run_callbacks("on_train_epoch_start")
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")  # suppress 'Detected lr_scheduler.step() before optimizer.step()'
-                self.scheduler.step()
+            nb = len(self.train_loader)  # number of batches
+            nw = max(round(self.args.warmup_epochs * nb), 100) if self.args.warmup_epochs > 0 else -1  # warmup iterations
+            last_opt_step = -1
+            self.epoch_time = None
+            self.epoch_time_start = time.time()
+            self.train_time_start = time.time()
+            self.run_callbacks("on_train_start")
+            LOGGER.info(
+                f"Image sizes {self.args.imgsz} train, {self.args.imgsz} val\n"
+                f"Using {self.train_loader.num_workers * (self.world_size or 1)} dataloader workers\n"
+                f"Logging results to {colorstr('bold', self.save_dir)}\n"
+                f"Starting training for "
+                + (f"{self.args.time} hours..." if self.args.time else f"{self.epochs} epochs...")
+            )
+            if self.args.close_mosaic:
+                base_idx = (self.epochs - self.args.close_mosaic) * nb
+                self.plot_idx.extend([base_idx, base_idx + 1, base_idx + 2])
+            epoch = self.start_epoch
+            self.optimizer.zero_grad()  # zero any resumed gradients to ensure stability on train start
+            self._oom_retries = 0  # OOM auto-reduce counter for first epoch
+            while True:
+                self.epoch = epoch
+                self.run_callbacks("on_train_epoch_start")
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")  # suppress 'Detected lr_scheduler.step() before optimizer.step()'
+                    self.scheduler.step()
 
-            self._model_train()
-            if RANK != -1:
-                self.train_loader.sampler.set_epoch(epoch)
-            pbar = enumerate(self.train_loader)
-            # Update dataloader attributes (optional)
-            if epoch == (self.epochs - self.args.close_mosaic):
-                self._close_dataloader_mosaic()
-                self.train_loader.reset()
+                self._model_train()
+                if RANK != -1:
+                    self.train_loader.sampler.set_epoch(epoch)
+                pbar = enumerate(self.train_loader)
+                # Update dataloader attributes (optional)
+                if epoch == (self.epochs - self.args.close_mosaic):
+                    self._close_dataloader_mosaic()
+                    self.train_loader.reset()
 
-            if RANK in {-1, 0}:
-                LOGGER.info(self.progress_string())
-                pbar = TQDM(enumerate(self.train_loader), total=nb)
-            self.tloss = None
-            for i, batch in pbar:
-                self.run_callbacks("on_train_batch_start")
-                # Warmup
-                ni = i + nb * epoch
-                if ni <= nw:
-                    xi = [0, nw]  # x interp
-                    self.accumulate = max(1, int(np.interp(ni, xi, [1, self.args.nbs / self.batch_size]).round()))
-                    for x in self.optimizer.param_groups:
-                        # Bias lr falls from 0.1 to lr0, all other lrs rise from 0.0 to lr0
-                        x["lr"] = np.interp(
-                            ni,
-                            xi,
-                            [
-                                self.args.warmup_bias_lr if x.get("param_group") == "bias" else 0.0,
-                                x["initial_lr"] * self.lf(epoch),
-                            ],
-                        )
-                        if "momentum" in x:
-                            x["momentum"] = np.interp(ni, xi, [self.args.warmup_momentum, self.args.momentum])
-
-                # Forward
-                try:
-                    with autocast(self.amp):
-                        batch = self.preprocess_batch(batch)
-                        if self.args.compile:
-                            # Decouple inference and loss calculations for improved compile performance
-                            preds = self.model(batch["img"])
-                            loss, self.loss_items = unwrap_model(self.model).loss(batch, preds)
-                        else:
-                            loss, self.loss_items = self.model(batch)
-                        self.loss = loss.sum()
-                        if RANK != -1:
-                            self.loss *= self.world_size
-
-                        finite_loss = torch.isfinite(self.loss).all()
-                        finite_items = torch.isfinite(self.loss_items).all()
-                        if not (finite_loss and finite_items):
-                            LOGGER.warning(
-                                f"Non-finite loss detected at epoch {epoch + 1}, batch {i + 1}; "
-                                "skipping optimizer step for this batch."
-                            )
-                            self.optimizer.zero_grad()
-                            continue
-
-                        self.tloss = (
-                            self.loss_items if self.tloss is None else (self.tloss * i + self.loss_items) / (i + 1)
-                        )
-
-                    # Backward
-                    self.scaler.scale(self.loss).backward()
-                except RuntimeError as e:
-                    is_oom = isinstance(e, torch.cuda.OutOfMemoryError)
-                    if not is_oom and not any(
-                        s in str(e)
-                        for s in (
-                            "CUDNN_STATUS_INTERNAL_ERROR",
-                            "unable to find an engine",
-                            "CUBLAS_STATUS_ALLOC_FAILED",
-                        )
-                    ):
-                        raise
-                    if epoch > self.start_epoch or self._oom_retries >= 3 or RANK != -1:
-                        raise  # only auto-reduce during first epoch on single GPU, max 3 retries
-                    self._oom_retries += 1
-                    old_batch = self.batch_size
-                    self.args.batch = self.batch_size = max(self.batch_size // 2, 1)
-                    LOGGER.warning(
-                        f"{'CUDA out of memory' if is_oom else 'CUDA backend memory error'} with batch={old_batch}. "
-                        f"Reducing to batch={self.batch_size} and retrying ({self._oom_retries}/3)."
-                    )
-                    batch = loss = preds = None
-                    self.loss = self.loss_items = self.tloss = None
-                    self._clear_memory()
-                    self._build_train_pipeline()  # rebuild dataloaders, optimizer, scheduler
-                    self.scheduler.last_epoch = self.start_epoch - 1
-                    nb = len(self.train_loader)
-                    nw = max(round(self.args.warmup_epochs * nb), 100) if self.args.warmup_epochs > 0 else -1
-                    last_opt_step = -1
-                    self.optimizer.zero_grad()
-                    break  # restart epoch loop with reduced batch size
-                if ni - last_opt_step >= self.accumulate:
-                    self.optimizer_step()
-                    last_opt_step = ni
-
-                    # Timed stopping
-                    if self.args.time:
-                        self.stop = (time.time() - self.train_time_start) > (self.args.time * 3600)
-                        if RANK != -1:  # if DDP training
-                            broadcast_list = [self.stop if RANK == 0 else None]
-                            dist.broadcast_object_list(broadcast_list, 0)  # broadcast 'stop' to all ranks
-                            self.stop = broadcast_list[0]
-                        if self.stop:  # training time exceeded
-                            break
-
-                # Log
                 if RANK in {-1, 0}:
-                    loss_length = self.tloss.shape[0] if len(self.tloss.shape) else 1
-                    pbar.set_description(
-                        ("%11s" * 2 + "%11.4g" * (2 + loss_length))
-                        % (
-                            f"{epoch + 1}/{self.epochs}",
-                            f"{self._get_memory():.3g}G",  # (GB) GPU memory util
-                            *(self.tloss if loss_length > 1 else torch.unsqueeze(self.tloss, 0)),  # losses
-                            batch["img"].shape[0],  # batch size, i.e. 8
-                            batch["img"].shape[-1],  # imgsz, i.e 640
+                    LOGGER.info(self.progress_string())
+                    pbar = TQDM(enumerate(self.train_loader), total=nb)
+                self.tloss = None
+                for i, batch in pbar:
+                    self.run_callbacks("on_train_batch_start")
+                    # Warmup
+                    ni = i + nb * epoch
+                    if ni <= nw:
+                        xi = [0, nw]  # x interp
+                        self.accumulate = max(1, int(np.interp(ni, xi, [1, self.args.nbs / self.batch_size]).round()))
+                        for x in self.optimizer.param_groups:
+                            # Bias lr falls from 0.1 to lr0, all other lrs rise from 0.0 to lr0
+                            x["lr"] = np.interp(
+                                ni,
+                                xi,
+                                [
+                                    self.args.warmup_bias_lr if x.get("param_group") == "bias" else 0.0,
+                                    x["initial_lr"] * self.lf(epoch),
+                                ],
+                            )
+                            if "momentum" in x:
+                                x["momentum"] = np.interp(ni, xi, [self.args.warmup_momentum, self.args.momentum])
+
+                    # Forward
+                    try:
+                        with autocast(self.amp):
+                            batch = self.preprocess_batch(batch)
+                            if self.args.compile:
+                                # Decouple inference and loss calculations for improved compile performance
+                                preds = self.model(batch["img"])
+                                loss, self.loss_items = unwrap_model(self.model).loss(batch, preds)
+                            else:
+                                loss, self.loss_items = self.model(batch)
+                            self.loss = loss.sum()
+                            if RANK != -1:
+                                self.loss *= self.world_size
+
+                            finite_loss = torch.isfinite(self.loss).all()
+                            finite_items = torch.isfinite(self.loss_items).all()
+                            if not (finite_loss and finite_items):
+                                LOGGER.warning(
+                                    f"Non-finite loss detected at epoch {epoch + 1}, batch {i + 1}; "
+                                    "skipping optimizer step for this batch."
+                                )
+                                self.optimizer.zero_grad()
+                                continue
+
+                            self.tloss = (
+                                self.loss_items if self.tloss is None else (self.tloss * i + self.loss_items) / (i + 1)
+                            )
+
+                        # Backward
+                        self.scaler.scale(self.loss).backward()
+                    except RuntimeError as e:
+                        is_oom = isinstance(e, torch.cuda.OutOfMemoryError)
+                        if not is_oom and not any(
+                            s in str(e)
+                            for s in (
+                                "CUDNN_STATUS_INTERNAL_ERROR",
+                                "unable to find an engine",
+                                "CUBLAS_STATUS_ALLOC_FAILED",
+                            )
+                        ):
+                            raise
+                        if epoch > self.start_epoch or self._oom_retries >= 3 or RANK != -1:
+                            raise  # only auto-reduce during first epoch on single GPU, max 3 retries
+                        self._oom_retries += 1
+                        old_batch = self.batch_size
+                        self.args.batch = self.batch_size = max(self.batch_size // 2, 1)
+                        LOGGER.warning(
+                            f"{'CUDA out of memory' if is_oom else 'CUDA backend memory error'} with batch={old_batch}. "
+                            f"Reducing to batch={self.batch_size} and retrying ({self._oom_retries}/3)."
                         )
-                    )
-                    self.run_callbacks("on_batch_end")
-                    if self.args.plots and ni in self.plot_idx:
-                        self.plot_training_samples(batch, ni)
+                        batch = loss = preds = None
+                        self.loss = self.loss_items = self.tloss = None
+                        self._clear_memory()
+                        self._build_train_pipeline()  # rebuild dataloaders, optimizer, scheduler
+                        self.scheduler.last_epoch = self.start_epoch - 1
+                        nb = len(self.train_loader)
+                        nw = max(round(self.args.warmup_epochs * nb), 100) if self.args.warmup_epochs > 0 else -1
+                        last_opt_step = -1
+                        self.optimizer.zero_grad()
+                        break  # restart epoch loop with reduced batch size
+                    if ni - last_opt_step >= self.accumulate:
+                        self.optimizer_step()
+                        last_opt_step = ni
 
-                self.run_callbacks("on_train_batch_end")
-                if self.stop:
-                    break  # allow external stop (e.g. platform cancellation) between batches
-            else:
-                # for/else: this block runs only when the for loop completes without break (no OOM retry)
-                self._oom_retries = 0  # reset OOM counter after successful first epoch
+                        # Timed stopping
+                        if self.args.time:
+                            self.stop = (time.time() - self.train_time_start) > (self.args.time * 3600)
+                            if RANK != -1:  # if DDP training
+                                broadcast_list = [self.stop if RANK == 0 else None]
+                                dist.broadcast_object_list(broadcast_list, 0)  # broadcast 'stop' to all ranks
+                                self.stop = broadcast_list[0]
+                            if self.stop:  # training time exceeded
+                                break
 
-            if self._oom_retries and not self.stop:
-                continue  # OOM recovery broke the for loop, restart with reduced batch size
+                    # Log
+                    if RANK in {-1, 0}:
+                        loss_length = self.tloss.shape[0] if len(self.tloss.shape) else 1
+                        pbar.set_description(
+                            ("%11s" * 2 + "%11.4g" * (2 + loss_length))
+                            % (
+                                f"{epoch + 1}/{self.epochs}",
+                                f"{self._get_memory():.3g}G",  # (GB) GPU memory util
+                                *(self.tloss if loss_length > 1 else torch.unsqueeze(self.tloss, 0)),  # losses
+                                batch["img"].shape[0],  # batch size, i.e. 8
+                                batch["img"].shape[-1],  # imgsz, i.e 640
+                            )
+                        )
+                        self.run_callbacks("on_batch_end")
+                        if self.args.plots and ni in self.plot_idx:
+                            self.plot_training_samples(batch, ni)
 
-            if hasattr(unwrap_model(self.model).criterion, "update"):
-                unwrap_model(self.model).criterion.update()
+                    self.run_callbacks("on_train_batch_end")
+                    if self.stop:
+                        break  # allow external stop (e.g. platform cancellation) between batches
+                else:
+                    # for/else: this block runs only when the for loop completes without break (no OOM retry)
+                    self._oom_retries = 0  # reset OOM counter after successful first epoch
 
-            self.lr = {f"lr/pg{ir}": x["lr"] for ir, x in enumerate(self.optimizer.param_groups)}  # for loggers
+                if self._oom_retries and not self.stop:
+                    continue  # OOM recovery broke the for loop, restart with reduced batch size
 
-            self.run_callbacks("on_train_epoch_end")
-            if RANK in {-1, 0}:
-                self.ema.update_attr(self.model, include=["yaml", "nc", "args", "names", "stride", "class_weights"])
+                if hasattr(unwrap_model(self.model).criterion, "update"):
+                    unwrap_model(self.model).criterion.update()
 
-            # Validation
-            final_epoch = epoch + 1 >= self.epochs
-            if self.args.val or final_epoch or self.stopper.possible_stop or self.stop:
-                self._clear_memory(None if self.device.type == "mps" else 0.5)  # prevent VRAM spike
-                self.metrics, self.fitness = self.validate()
+                self.lr = {f"lr/pg{ir}": x["lr"] for ir, x in enumerate(self.optimizer.param_groups)}  # for loggers
 
-            # NaN recovery
-            if self._handle_nan_recovery(epoch):
-                continue
+                self.run_callbacks("on_train_epoch_end")
+                if RANK in {-1, 0}:
+                    self.ema.update_attr(self.model, include=["yaml", "nc", "args", "names", "stride", "class_weights"])
 
-            self.nan_recovery_attempts = 0
-            if RANK in {-1, 0}:
-                self.save_metrics(metrics={**self.label_loss_items(self.tloss), **self.metrics, **self.lr})
-                self.stop |= self.stopper(epoch + 1, self.fitness) or final_epoch
+                # Validation
+                final_epoch = epoch + 1 >= self.epochs
+                if self.args.val or final_epoch or self.stopper.possible_stop or self.stop:
+                    self._clear_memory(None if self.device.type == "mps" else 0.5)  # prevent VRAM spike
+                    self.metrics, self.fitness = self.validate()
+
+                # NaN recovery
+                if self._handle_nan_recovery(epoch):
+                    continue
+
+                self.nan_recovery_attempts = 0
+                if RANK in {-1, 0}:
+                    self.save_metrics(metrics={**self.label_loss_items(self.tloss), **self.metrics, **self.lr})
+                    self.stop |= self.stopper(epoch + 1, self.fitness) or final_epoch
+                    if self.args.time:
+                        self.stop |= (time.time() - self.train_time_start) > (self.args.time * 3600)
+
+                    # Save model
+                    if (self.args.save or final_epoch) and self.save_model():
+                        self.run_callbacks("on_model_save")
+
+                # Scheduler
+                t = time.time()
+                self.epoch_time = t - self.epoch_time_start
+                self.epoch_time_start = t
                 if self.args.time:
-                    self.stop |= (time.time() - self.train_time_start) > (self.args.time * 3600)
+                    mean_epoch_time = (t - self.train_time_start) / (epoch - self.start_epoch + 1)
+                    self.epochs = self.args.epochs = math.ceil(self.args.time * 3600 / mean_epoch_time)
+                    self._setup_scheduler()
+                    self.scheduler.last_epoch = self.epoch  # do not move
+                    self.stop |= epoch >= self.epochs  # stop if exceeded epochs
+                self.run_callbacks("on_fit_epoch_end")
+                # clear if memory utilization > 50%; always clear on MPS due to leak https://github.com/ultralytics/ultralytics/issues/22621
+                self._clear_memory(None if self.device.type == "mps" else 0.5)
 
-                # Save model
-                if (self.args.save or final_epoch) and self.save_model():
-                    self.run_callbacks("on_model_save")
+                # Early Stopping
+                if RANK != -1:  # if DDP training
+                    broadcast_list = [self.stop if RANK == 0 else None]
+                    dist.broadcast_object_list(broadcast_list, 0)  # broadcast 'stop' to all ranks
+                    self.stop = broadcast_list[0]
+                if self.stop:
+                    break  # must break all DDP ranks
+                epoch += 1
 
-            # Scheduler
-            t = time.time()
-            self.epoch_time = t - self.epoch_time_start
-            self.epoch_time_start = t
-            if self.args.time:
-                mean_epoch_time = (t - self.train_time_start) / (epoch - self.start_epoch + 1)
-                self.epochs = self.args.epochs = math.ceil(self.args.time * 3600 / mean_epoch_time)
-                self._setup_scheduler()
-                self.scheduler.last_epoch = self.epoch  # do not move
-                self.stop |= epoch >= self.epochs  # stop if exceeded epochs
-            self.run_callbacks("on_fit_epoch_end")
-            # clear if memory utilization > 50%; always clear on MPS due to leak https://github.com/ultralytics/ultralytics/issues/22621
-            self._clear_memory(None if self.device.type == "mps" else 0.5)
-
-            # Early Stopping
-            if RANK != -1:  # if DDP training
-                broadcast_list = [self.stop if RANK == 0 else None]
-                dist.broadcast_object_list(broadcast_list, 0)  # broadcast 'stop' to all ranks
-                self.stop = broadcast_list[0]
-            if self.stop:
-                break  # must break all DDP ranks
-            epoch += 1
-
-        seconds = time.time() - self.train_time_start
-        LOGGER.info(f"\n{epoch - self.start_epoch + 1} epochs completed in {seconds / 3600:.3f} hours.")
-        # Do final val with best.pt
-        self.final_eval()
-        if RANK in {-1, 0}:
-            if self.args.plots:
-                self.plot_metrics()
-            self.run_callbacks("on_train_end")
-        self._clear_memory()
-        unset_deterministic()
-        self.run_callbacks("teardown")
+            seconds = time.time() - self.train_time_start
+            LOGGER.info(f"\n{epoch - self.start_epoch + 1} epochs completed in {seconds / 3600:.3f} hours.")
+            # Do final val with best.pt
+            self.final_eval()
+            if RANK in {-1, 0}:
+                if self.args.plots:
+                    self.plot_metrics()
+                self.run_callbacks("on_train_end")
+            self._clear_memory()
+            unset_deterministic()
+            self.run_callbacks("teardown")
+        finally:
+            self._restore_signal_handlers()
 
     def auto_batch(self, max_num_obj=0, dataset_size=0):
         """Calculate optimal batch size based on model and device memory constraints."""

@@ -6,7 +6,7 @@ def parse_args():
     parser.add_argument("--project", type=str, default="cst-sample-5k1k1k-s100", help="Project name for saving results")
     parser.add_argument("--name", type=str, default="rtdetr-pretrained", help="Experiment name for saving results")
     parser.add_argument("--model", type=str, default="rtdetr-l.yaml", help="Pretrained model to use")
-    parser.add_argument("--epochs", type=int, default=200, help="Number of training epochs")
+    parser.add_argument("--epochs", type=int, default=30, help="Number of training epochs")
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size for training")
     parser.add_argument("--imgsz", type=int, default=640, help="Image size for training")
     parser.add_argument("--device", type=str, default=None, help="Training device, e.g. 0 or cpu")

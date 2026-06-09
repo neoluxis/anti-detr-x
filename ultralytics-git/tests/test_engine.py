@@ -1,6 +1,7 @@
 # Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
 
 import sys
+import signal
 from types import SimpleNamespace
 from unittest import mock
 
@@ -171,6 +172,47 @@ def test_nan_recovery():
     trainer.add_callback("on_train_batch_end", inject_nan)
     trainer.train()
     assert nan_injected[0], "NaN injection failed"
+
+
+def test_sigint_triggers_graceful_train_shutdown(monkeypatch, tmp_path):
+    """Test that SIGINT requests a graceful stop and still runs final train cleanup hooks."""
+    calls = {"final_eval": 0, "plot_metrics": 0}
+    original_final_eval = detect.DetectionTrainer.final_eval
+    original_plot_metrics = detect.DetectionTrainer.plot_metrics
+
+    def patched_final_eval(self):
+        calls["final_eval"] += 1
+        return original_final_eval(self)
+
+    def patched_plot_metrics(self):
+        calls["plot_metrics"] += 1
+        return original_plot_metrics(self)
+
+    def request_sigint(trainer):
+        if trainer.epoch == 0 and not trainer._sigint_received:
+            trainer._handle_sigint(signal.SIGINT, None)
+
+    monkeypatch.setattr(detect.DetectionTrainer, "final_eval", patched_final_eval)
+    monkeypatch.setattr(detect.DetectionTrainer, "plot_metrics", patched_plot_metrics)
+
+    model = YOLO("yolo26n.yaml")
+    model.add_callback("on_train_batch_start", request_sigint)
+    model.train(
+        data="coco8.yaml",
+        epochs=5,
+        imgsz=32,
+        workers=0,
+        project=tmp_path,
+        name="sigint-graceful-stop",
+        exist_ok=True,
+        save=True,
+        plots=True,
+    )
+
+    assert model.trainer._sigint_received, "SIGINT was not registered by the trainer"
+    assert model.trainer.epoch == 0, "Graceful SIGINT should stop after the current epoch"
+    assert calls["final_eval"] == 1, "Final validation cleanup did not run after SIGINT"
+    assert calls["plot_metrics"] == 1, "Metrics plot cleanup did not run after SIGINT"
 
 
 @pytest.mark.parametrize(
