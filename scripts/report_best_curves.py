@@ -15,8 +15,42 @@ from ultralytics.models.rtdetr import RTDETRValidator
 from ultralytics.models.yolo.detect import DetectionValidator
 from ultralytics.utils.metrics import smooth
 
+CURVE_COLORS = [
+    "#1f77b4",
+    "#d62728",
+    "#2ca02c",
+    "#ff7f0e",
+    "#9467bd",
+    "#8c564b",
+    "#e377c2",
+    "#17becf",
+    "#bcbd22",
+    "#7f7f7f",
+    "#393b79",
+    "#637939",
+    "#8c6d31",
+    "#843c39",
+    "#7b4173",
+    "#3182bd",
+]
+
 # <display name>: <run name>
-DEFAULT_MODELS = {}
+DEFAULT_MODELS = {
+    "rtdetr-l": "redetr-l-init-2",
+    "rtdetr-p2": "rtdetr-p2-init",
+    "rtdetr-r18": "rtdetr-r18-init",
+    "rtdetr-HIFI": "rtdetr-hifi-init-2",
+    "rtdetr-WTConv": "rtdetr-wtconv-init",
+    "rtdetr-MRFPN": "rtdetr-mrfpn-init",
+    "yolo26s-p2": "yolo26s-p2-init",
+    "yolo11s-p2": "yolo11s-p2-init",
+    "yolov8s-p2": "yolov8s-p2-init",
+    "yolov5s-p2": "yolov5s-p2-init",
+    "yolo26s": "yolo26s-pretrained",
+    "yolo11s": "yolo11s-pretrained",
+    "yolov8s": "yolov8s-pretrained",
+    "yolov5s": "yolov5s-pretrained-2",
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -60,7 +94,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--device",
         type=str,
-        default='cpu',
+        default='cuda',
         help="Override validation device, e.g. 0 or cpu.",
     )
     return parser.parse_args()
@@ -108,6 +142,43 @@ def load_run_args(run_dir: Path) -> dict:
         return yaml.safe_load(f)
 
 
+def infer_model_channels(model) -> int:
+    yaml_channels = getattr(getattr(model, "model", None), "yaml", {}).get("channels")
+    if yaml_channels is not None:
+        return int(yaml_channels)
+
+    module = getattr(model, "model", model)
+    for child in module.modules():
+        conv = getattr(child, "conv", None)
+        if conv is not None and hasattr(conv, "in_channels"):
+            return int(conv.in_channels)
+        if hasattr(child, "in_channels"):
+            return int(child.in_channels)
+    return 3
+
+
+def build_compatible_data_path(data_path: str | os.PathLike, expected_channels: int, save_dir: Path) -> tuple[str, bool]:
+    data_path = Path(data_path)
+    if data_path.suffix not in {".yaml", ".yml"}:
+        return str(data_path), False
+
+    with data_path.open("r", encoding="utf-8") as f:
+        data_cfg = yaml.safe_load(f)
+
+    current_channels = int(data_cfg.get("channels", 3))
+    if current_channels == expected_channels:
+        return str(data_path), False
+
+    compat_dir = save_dir / "compat"
+    compat_dir.mkdir(parents=True, exist_ok=True)
+    compat_path = compat_dir / f"{data_path.stem}.channels-{expected_channels}{data_path.suffix}"
+    compat_cfg = dict(data_cfg)
+    compat_cfg["channels"] = int(expected_channels)
+    with compat_path.open("w", encoding="utf-8") as f:
+        yaml.safe_dump(compat_cfg, f, sort_keys=False, allow_unicode=True)
+    return str(compat_path), True
+
+
 def pick_model_and_validator(best_pt: Path, train_args: dict):
     model_hint = str(train_args.get("model", "")).lower()
     if "rtdetr" in model_hint or "rtdetr" in best_pt.name.lower():
@@ -131,6 +202,7 @@ def collect_curves(
 
     train_args = load_run_args(run_dir)
     model, validator_cls = pick_model_and_validator(best_pt, train_args)
+    model_channels = infer_model_channels(model)
 
     batch = batch_override if batch_override is not None else max(int(train_args.get("batch", 1)) * 2, 1)
     imgsz = imgsz_override if imgsz_override is not None else int(train_args.get("imgsz", 640))
@@ -138,9 +210,10 @@ def collect_curves(
     split = train_args.get("split", "val")
 
     save_dir = output_dir / run_name
+    data_path, patched_channels = build_compatible_data_path(train_args["data"], model_channels, save_dir)
     validator_args = {
         "model": str(best_pt),
-        "data": train_args["data"],
+        "data": data_path,
         "imgsz": imgsz,
         "batch": batch,
         "device": device,
@@ -182,6 +255,9 @@ def collect_curves(
         "run_dir": run_dir,
         "save_dir": save_dir,
         "metrics": stats,
+        "data_path": data_path,
+        "patched_channels": patched_channels,
+        "model_channels": model_channels,
         "pr_x": np.asarray(plot_data["pr_curve"]["x"], dtype=float),
         "pr_y": pr_y.mean(axis=0),
         "p_x": np.asarray(plot_data["precision_curve"]["x"], dtype=float),
@@ -193,8 +269,9 @@ def collect_curves(
 
 def plot_combined_curve(records: list[dict], x_key: str, y_key: str, title: str, xlabel: str, ylabel: str, output_path: Path):
     fig, ax = plt.subplots(1, 1, figsize=(9, 6), tight_layout=True)
-    for record in records:
-        ax.plot(record[x_key], record[y_key], linewidth=2, label=record["display_name"])
+    for idx, record in enumerate(records):
+        color = CURVE_COLORS[idx % len(CURVE_COLORS)]
+        ax.plot(record[x_key], record[y_key], linewidth=2, color=color, label=record["display_name"])
     ax.set_title(title)
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
@@ -258,6 +335,9 @@ def write_report(records: list[dict], project_path: Path, output_dir: Path):
                 "",
                 f"- Run name: `{record['run_name']}`",
                 f"- Validation output: `{record['save_dir']}`",
+                f"- Validator data: `{record['data_path']}`",
+                f"- Model channels: `{record['model_channels']}`",
+                f"- Channel compat override: `{'yes' if record['patched_channels'] else 'no'}`",
                 "",
             ]
         )

@@ -59,3 +59,32 @@ uv run scripts/train_detr.py
 ```
 也可以直接命令行传参，或者放在后台任务运行
 
+## 验证结果整理
+
+修改 `scripts/report_best_curves.py` 
+
+```python
+# <display name>: <run name>
+DEFAULT_MODELS = {
+    "rtdetr-l": "redetr-l-init-2",
+    "rtdetr-p2": "rtdetr-p2-init",
+    "rtdetr-r18": "rtdetr-r18-init",
+    "rtdetr-HIFI": "rtdetr-hifi-init-2",
+    "rtdetr-WTConv": "rtdetr-wtconv-init",
+    "rtdetr-MRFPN": "rtdetr-mrfpn-init",
+    "yolo26s-p2": "yolo26s-p2-init",
+    "yolo11s-p2": "yolo11s-p2-init",
+    "yolov8s-p2": "yolov8s-p2-init",
+    "yolov5s-p2": "yolov5s-p2-init",
+    "yolo26s": "yolo26s-pretrained",
+    "yolo11s": "yolo11s-pretrained",
+    "yolov8s": "yolov8s-pretrained",
+    "yolov5s": "yolov5s-pretrained-2",
+}
+```
+
+key 为图表中展示的名称，value 为对应的 run name。
+
+```bash
+uv run scripts/report_best_curves.py
+```
