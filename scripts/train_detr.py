@@ -1,5 +1,19 @@
-from ultralytics import RTDETR
 import argparse
+from pathlib import Path
+
+from ultralytics import RTDETR
+
+
+def parse_pretrained_arg(value: str | None):
+    """Normalize CLI pretrained values into bool/path/None for Ultralytics."""
+    if value is None:
+        return None
+    lower = value.lower()
+    if lower == "true":
+        return True
+    if lower == "false":
+        return False
+    return value
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Train RT-DETR model")
@@ -23,13 +37,22 @@ def parse_args():
     parser.add_argument("--workers", type=int, default=8, help="Number of workers for data loading")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
     parser.add_argument("--deterministic", action="store_true", default=False, help="Enable deterministic training for reproducibility")
-    
+    parser.add_argument("--freeze", type=int, default=0, help="Freeze the first N model layers")
+    parser.add_argument(
+        "--pretrained",
+        type=str,
+        default=None,
+        help="Optional checkpoint path or true/false. Leave unset to use model/YAML defaults.",
+    )
+    parser.add_argument("--exist-ok", action="store_true", default=False, help="Allow overwriting an existing run directory")
     return parser.parse_args()
+
 
 if __name__ == "__main__":
     args = parse_args()
-    yolo = RTDETR(args.model)
-    yolo.train(
+    model_path = str(Path(args.model))
+    yolo = RTDETR(model_path)
+    train_kwargs = dict(
         data=args.dataset_path,
         epochs=args.epochs,
         batch=args.batch_size,
@@ -49,8 +72,14 @@ if __name__ == "__main__":
         workers=args.workers,
         seed=args.seed,
         deterministic=args.deterministic,
+        freeze=args.freeze,
+        exist_ok=args.exist_ok,
         mosaic=False,  ## 加速训练 4.5min/epoch -> 1min/epoch
         mixup=False,   # Disable mixup augmentation for better small object detection
     )
+    pretrained = parse_pretrained_arg(args.pretrained)
+    if pretrained is not None:
+        train_kwargs["pretrained"] = pretrained
+    yolo.train(**train_kwargs)
 
     # os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True,max_split_size_mb:128")

@@ -24,14 +24,17 @@ CURVE_COLORS = [
     "#8c564b",
     "#e377c2",
     "#17becf",
-    "#bcbd22",
+    "#b3b349",
     "#7f7f7f",
     "#393b79",
     "#637939",
     "#8c6d31",
     "#843c39",
     "#7b4173",
-    "#3182bd",
+    "#fff200",
+    "#dd875d",
+    "#63a176",
+    "#BFED4A",
 ]
 
 # <display name>: <run name>
@@ -42,14 +45,25 @@ DEFAULT_MODELS = {
     "rtdetr-HIFI": "rtdetr-hifi-init-2",
     "rtdetr-WTConv": "rtdetr-wtconv-init",
     "rtdetr-MRFPN": "rtdetr-mrfpn-init",
-    "yolo26s-p2": "yolo26s-p2-init",
-    "yolo11s-p2": "yolo11s-p2-init",
-    "yolov8s-p2": "yolov8s-p2-init",
-    "yolov5s-p2": "yolov5s-p2-init",
-    "yolo26s": "yolo26s-pretrained",
-    "yolo11s": "yolo11s-pretrained",
-    "yolov8s": "yolov8s-pretrained",
-    "yolov5s": "yolov5s-pretrained-2",
+    "anti-detr-3o": "rtdetr-HIFI-MRFPN-WTConv-init",
+    # "yolo26s-p2": "yolo26s-p2-init",
+    # "yolo11s-p2": "yolo11s-p2-init",
+    # "yolov8s-p2": "yolov8s-p2-init",
+    # "yolov5s-p2": "yolov5s-p2-init",
+    # "yolo26s": "yolo26s-pretrained",
+    # "yolo11s": "yolo11s-pretrained",
+    # "yolov8s": "yolov8s-pretrained",
+    # "yolov5s": "yolov5s-pretrained-2",
+    "rtdetr-dgwrn": "exp1-dgwrn",
+    "rtdetr-dgwrn-biagcau": "exp2-dgwrn-biagcau",
+    "rtdetr-dgwrn-biagcau-mdhifi": "exp3-dgwrn-biagcau-mdhifi",
+    # "yolo11s-ema-p2": "yolo11s-ema-p2-init-3",
+    "rtdetr-ema-p2-init": "rtdetr-ema-p2-init",
+    "rtdetr-resnet101": "rtdetr-resnet101",
+    "rtdetr-resnet50": "rtdetr-resnet50",
+    "rtdetr-exp3-ema-biagcau-mdhifi": "rtdetr-exp3-ema-biagcau-mdhifi",
+    "rtdetr-exp2-ema-biagcau": "rtdetr-exp2-ema-biagcau",
+    "rtdetr-exp1-ema": "rtdetr-exp1-ema",
 }
 
 
@@ -76,7 +90,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=None,
+        default="runs/plots/rtdetrs",
         help="Directory for merged figures and report. Defaults to <project-path>/best_curve_report.",
     )
     parser.add_argument(

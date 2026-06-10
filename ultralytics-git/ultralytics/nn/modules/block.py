@@ -45,6 +45,7 @@ __all__ = (
     "HGBlock",
     "HGStem",
     "ImagePoolingAttn",
+    "EMA",
     "Proto",
     "RepC3",
     "RepNCSPELAN4",
@@ -100,6 +101,50 @@ class Proto(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Perform a forward pass through layers using an upsampled input image."""
         return self.cv3(self.cv2(self.upsample(self.cv1(x))))
+
+
+class EMA(nn.Module):
+    """Efficient multi-scale attention with grouped spatial aggregation."""
+
+    def __init__(self, c1: int, c2: int | None = None, factor: int = 32):
+        """Initialize EMA while preserving channel count across the block."""
+        super().__init__()
+        c2 = c1 if c2 is None else c2
+        if c1 != c2:
+            raise ValueError(f"EMA expects equal input/output channels, but got c1={c1}, c2={c2}.")
+
+        groups = min(factor, c1)
+        while groups > 1 and c1 % groups != 0:
+            groups -= 1
+        if groups < 1 or c1 // groups < 1:
+            raise ValueError(f"EMA could not derive valid groups for channels={c1}, factor={factor}.")
+
+        gc = c1 // groups
+        self.groups = groups
+        self.softmax = nn.Softmax(-1)
+        self.agp = nn.AdaptiveAvgPool2d((1, 1))
+        self.pool_h = nn.AdaptiveAvgPool2d((None, 1))
+        self.pool_w = nn.AdaptiveAvgPool2d((1, None))
+        self.gn = nn.GroupNorm(gc, gc)
+        self.conv1x1 = nn.Conv2d(gc, gc, kernel_size=1, stride=1, padding=0)
+        self.conv3x3 = nn.Conv2d(gc, gc, kernel_size=3, stride=1, padding=1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply grouped horizontal/vertical attention and fuse global responses."""
+        b, c, h, w = x.size()
+        group_x = x.reshape(b * self.groups, -1, h, w)
+        x_h = self.pool_h(group_x)
+        x_w = self.pool_w(group_x).permute(0, 1, 3, 2)
+        hw = self.conv1x1(torch.cat([x_h, x_w], dim=2))
+        x_h, x_w = torch.split(hw, [h, w], dim=2)
+        x1 = self.gn(group_x * x_h.sigmoid() * x_w.permute(0, 1, 3, 2).sigmoid())
+        x2 = self.conv3x3(group_x)
+        x11 = self.softmax(self.agp(x1).reshape(b * self.groups, -1, 1).permute(0, 2, 1))
+        x12 = x2.reshape(b * self.groups, c // self.groups, -1)
+        x21 = self.softmax(self.agp(x2).reshape(b * self.groups, -1, 1).permute(0, 2, 1))
+        x22 = x1.reshape(b * self.groups, c // self.groups, -1)
+        weights = (torch.matmul(x11, x12) + torch.matmul(x21, x22)).reshape(b * self.groups, 1, h, w)
+        return (group_x * weights.sigmoid()).reshape(b, c, h, w)
 
 
 class HGStem(nn.Module):
