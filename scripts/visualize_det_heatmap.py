@@ -63,8 +63,27 @@ def collect_images(source: str, max_images: int) -> list[Path]:
     return images[:max_images]
 
 
+def resolve_model_path(model_path: str) -> str:
+    path = Path(model_path)
+    if path.is_file():
+        return str(path)
+    if path.is_dir():
+        candidate = path / "weights" / "best.pt"
+        if candidate.is_file():
+            return str(candidate)
+        candidate = path / "best.pt"
+        if candidate.is_file():
+            return str(candidate)
+        if path.name == "weights":
+            candidate = path / "best.pt"
+            if candidate.is_file():
+                return str(candidate)
+    return model_path
+
+
 def load_wrapper(model_path: str, arch: str, device: str | None):
-    wrapper = RTDETR(model_path) if arch == "detr" else YOLO(model_path)
+    resolved_model_path = resolve_model_path(model_path)
+    wrapper = RTDETR(resolved_model_path) if arch == "detr" else YOLO(resolved_model_path)
     if device is not None:
         wrapper.to(device)
     wrapper.model.eval()

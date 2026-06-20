@@ -15,37 +15,71 @@ from ultralytics.models.rtdetr import RTDETRValidator
 from ultralytics.models.yolo.detect import DetectionValidator
 from ultralytics.utils.metrics import smooth
 
-CURVE_COLORS = [
-    "#1f77b4",
-    "#d62728",
-    "#2ca02c",
-    "#ff7f0e",
-    "#9467bd",
-    "#8c564b",
-    "#e377c2",
-    "#17becf",
-    "#b3b349",
-    "#7f7f7f",
-    "#393b79",
-    "#637939",
-    "#8c6d31",
-    "#843c39",
-    "#7b4173",
-    "#fff200",
-    "#dd875d",
-    "#63a176",
-    "#BFED4A",
-]
+import colorsys
+import random
+
+
+def gencolors(n):
+    """
+    通过在 HSL 空间引入多维随机偏移，生成视觉可分辨的色盘
+    """
+    colors = []
+
+    # 将色相环等分为 n 份
+    hue_step = 1.0 / n
+
+    for i in range(n):
+        # 1. 色相(H)：在每个区间内进行大范围偏移，但保证大基调差异
+        base_hue = i * hue_step
+        hue = (base_hue + random.uniform(0, hue_step * 0.8)) % 1.0
+
+        # 2. 饱和度(S)：在 [0.5, 0.9] 范围内随机，避开灰暗颜色
+        saturation = random.uniform(0.3, 0.9)
+
+        # 3. 亮度(L)：在 [0.4, 0.7] 范围内随机，避开极亮（白）和极暗（黑）
+        # 这样确保了所有颜色在显示器上都有足够的对比度
+        lightness = random.uniform(0.3, 0.8)
+
+        # 转换并存储
+        r, g, b = colorsys.hls_to_rgb(hue, lightness, saturation)
+        colors.append((int(r * 255), int(g * 255), int(b * 255)))
+
+    # 彻底打乱空间分布
+    random.shuffle(colors)
+
+    results = []
+    for color in colors:
+        # 将 RGB 元组转换为十六进制字符串格式
+        hex_color = "#{:02x}{:02x}{:02x}".format(*color)
+        results.append(hex_color)
+
+    return results
+
+
+# CURVE_COLORS = [
+#     "#1f77b4",
+#     "#d62728",
+#     "#2ca02c",
+#     "#ff7f0e",
+#     "#9467bd",
+#     "#8c564b",
+#     "#e377c2",
+#     "#17becf",
+#     "#b3b349",
+#     "#7f7f7f",
+#     "#393b79",
+#     "#637939",
+#     "#8c6d31",
+#     "#843c39",
+#     "#7b4173",
+#     "#fff200",
+#     "#dd875d",
+#     "#63a176",
+#     "#BFED4A",
+# ]
 
 # <display name>: <run name>
 DEFAULT_MODELS = {
-    "rtdetr-l": "redetr-l-init-2",
-    "rtdetr-p2": "rtdetr-p2-init",
-    "rtdetr-r18": "rtdetr-r18-init",
-    "rtdetr-HIFI": "rtdetr-hifi-init-2",
-    "rtdetr-WTConv": "rtdetr-wtconv-init",
-    "rtdetr-MRFPN": "rtdetr-mrfpn-init",
-    "anti-detr-3o": "rtdetr-HIFI-MRFPN-WTConv-init",
     # "yolo26s-p2": "yolo26s-p2-init",
     # "yolo11s-p2": "yolo11s-p2-init",
     # "yolov8s-p2": "yolov8s-p2-init",
@@ -54,25 +88,51 @@ DEFAULT_MODELS = {
     # "yolo11s": "yolo11s-pretrained",
     # "yolov8s": "yolov8s-pretrained",
     # "yolov5s": "yolov5s-pretrained-2",
-    "rtdetr-dgwrn": "exp1-dgwrn",
-    "rtdetr-dgwrn-biagcau": "exp2-dgwrn-biagcau",
-    "rtdetr-dgwrn-biagcau-mdhifi": "exp3-dgwrn-biagcau-mdhifi",
     # "yolo11s-ema-p2": "yolo11s-ema-p2-init-3",
-    "rtdetr-ema-p2-init": "rtdetr-ema-p2-init",
-    "rtdetr-resnet101": "rtdetr-resnet101",
-    "rtdetr-resnet50": "rtdetr-resnet50",
-    "rtdetr-exp3-ema-biagcau-mdhifi": "rtdetr-exp3-ema-biagcau-mdhifi",
-    "rtdetr-exp2-ema-biagcau": "rtdetr-exp2-ema-biagcau",
-    "rtdetr-exp1-ema": "rtdetr-exp1-ema",
+    # "rtdetr-l": "redetr-l-init-2",
+    # "rtdetr-p2": "rtdetr-p2-init",
+    # "rtdetr-r18": "rtdetr-r18-init",
+    # "rtdetr-HIFI": "rtdetr-hifi-init-2",
+    # "rtdetr-WTConv": "rtdetr-wtconv-init",
+    # "rtdetr-MRFPN": "rtdetr-mrfpn-init",
+    # "anti-detr-3o": "rtdetr-HIFI-MRFPN-WTConv-init",
+    # "rtdetr-dgwrn": "exp1-dgwrn",
+    # "rtdetr-dgwrn-biagcau": "exp2-dgwrn-biagcau",
+    # "rtdetr-dgwrn-biagcau-mdhifi": "exp3-dgwrn-biagcau-mdhifi",
+    # "rtdetr-ema-p2-init": "rtdetr-ema-p2-init",
+    # "rtdetr-resnet101": "rtdetr-resnet101",
+    # "rtdetr-resnet50": "rtdetr-resnet50",
+    # "rtdetr-exp3-ema-biagcau-mdhifi": "rtdetr-exp3-ema-biagcau-mdhifi",
+    # "rtdetr-exp2-ema-biagcau": "rtdetr-exp2-ema-biagcau",
+    # "rtdetr-exp1-ema": "rtdetr-exp1-ema",
+    # "rtdetr-resnet50-unfreeze-last3-ema": "rtdetr-resnet50-unfreeze-last3-ema",
+    # "rtdetr-resnet50-unfreeze-last3": "rtdetr-resnet50-unfreeze-last3",
+    # "rtdetr-resnet50-freeze-last3-ema": "rtdetr-resnet50-freeze-last3-ema",
+    # "rtdetr-resnet50-freeze-last3": "rtdetr-resnet50-freeze-last3",
+    "rtdetr-resnet101-unfreeze-last3-ema-12k4k4k": "rtdetr-resnet101-unfreeze-last3-ema-12k4k4k",
+    "rtdetr-resnet50-unfreeze-last3-ema-12k4k4k": "rtdetr-resnet50-unfreeze-last3-ema-12k4k4k",
+    "rtdetr-resnet50-unfreeze-last3-12k4k4k": "rtdetr-resnet50-unfreeze-last3-12k4k4k",
+    "rtdetr-resnet101-unfreeze-last3-12k4k4k": "rtdetr-resnet101-unfreeze-last3-12k4k4k-2",
+    "rtdetr-resnet101-unfreeze-last3-ema-12k4k4k-e100": "rtdetr-resnet101-unfreeze-last3-ema-12k4k4k-e100",
+    "rtdetr-resnet50-unfreeze-last3-ema-12k4k4k-e100": "rtdetr-resnet50-unfreeze-last3-ema-12k4k4k-e100",
+    "rtdetr-swinv2-small-unfreeze-last3-12k4k4k-e100": "rtdetr-swinv2-small-unfreeze-last3-12k4k4k-e100",
+    "rtdetr-swinv2-small-unfreeze-last3-ema-12k4k4k-e100": "rtdetr-swinv2-small-unfreeze-last3-ema-12k4k4k-e100",
+    "rtdetr-swinv2-tiny-unfreeze-last3-12k4k4k-e100": "rtdetr-swinv2-tiny-unfreeze-last3-12k4k4k-e100-2",
+    "rtdetr-swinv2-tiny-unfreeze-last3-12k4k4k-ema-e100": "rtdetr-swinv2-tiny-unfreeze-last3-ema-12k4k4k-e100-2",
+    "rtdetr-resnet101-unfreeze-last3-ema-wtconv-biagcau-mdhifi-12k4k4k-e100": "rtdetr-resnet101-unfreeze-last3-ema-wtconv-biagcau-mdhifi-12k4k4k-e100",
+    "rtdetr-swinv2-tiny-unfreeze-last3-ema-wtconv-biagcau-mdhifi-12k4k4k-e100": "rtdetr-swinv2-tiny-unfreeze-last3-ema-wtconv-biagcau-mdhifi-12k4k4k-e100",
 }
 
+CURVE_COLORS = gencolors(len(DEFAULT_MODELS))
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Compare best.pt validation curves across multiple runs.")
+    parser = argparse.ArgumentParser(
+        description="Compare best.pt validation curves across multiple runs."
+    )
     parser.add_argument(
         "--project-path",
         type=Path,
-        default=Path("runs/detect/cst-sample-5k1k1k-s100"),
+        default=Path("runs/detect/cst-sample-12k4k4k-s100"),
         help="Project folder that contains multiple run directories.",
     )
     parser.add_argument(
@@ -90,7 +150,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default="runs/plots/rtdetrs",
+        default="runs/plots/rtdetrs-12k4k4ks100",
         help="Directory for merged figures and report. Defaults to <project-path>/best_curve_report.",
     )
     parser.add_argument(
@@ -108,7 +168,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--device",
         type=str,
-        default='cuda',
+        default="cuda",
         help="Override validation device, e.g. 0 or cpu.",
     )
     return parser.parse_args()
@@ -123,7 +183,9 @@ def parse_model_overrides(raw_items: list[str]) -> dict[str, str]:
         display_name = display_name.strip()
         run_name = run_name.strip()
         if not display_name or not run_name:
-            raise ValueError(f"Invalid --model '{item}', DISPLAY and RUN_NAME must be non-empty")
+            raise ValueError(
+                f"Invalid --model '{item}', DISPLAY and RUN_NAME must be non-empty"
+            )
         parsed[display_name] = run_name
     return parsed
 
@@ -171,7 +233,9 @@ def infer_model_channels(model) -> int:
     return 3
 
 
-def build_compatible_data_path(data_path: str | os.PathLike, expected_channels: int, save_dir: Path) -> tuple[str, bool]:
+def build_compatible_data_path(
+    data_path: str | os.PathLike, expected_channels: int, save_dir: Path
+) -> tuple[str, bool]:
     data_path = Path(data_path)
     if data_path.suffix not in {".yaml", ".yml"}:
         return str(data_path), False
@@ -185,7 +249,9 @@ def build_compatible_data_path(data_path: str | os.PathLike, expected_channels: 
 
     compat_dir = save_dir / "compat"
     compat_dir.mkdir(parents=True, exist_ok=True)
-    compat_path = compat_dir / f"{data_path.stem}.channels-{expected_channels}{data_path.suffix}"
+    compat_path = (
+        compat_dir / f"{data_path.stem}.channels-{expected_channels}{data_path.suffix}"
+    )
     compat_cfg = dict(data_cfg)
     compat_cfg["channels"] = int(expected_channels)
     with compat_path.open("w", encoding="utf-8") as f:
@@ -218,13 +284,27 @@ def collect_curves(
     model, validator_cls = pick_model_and_validator(best_pt, train_args)
     model_channels = infer_model_channels(model)
 
-    batch = batch_override if batch_override is not None else max(int(train_args.get("batch", 1)) * 2, 1)
-    imgsz = imgsz_override if imgsz_override is not None else int(train_args.get("imgsz", 640))
-    device = device_override if device_override is not None else (train_args.get("device") or "")
+    batch = (
+        batch_override
+        if batch_override is not None
+        else max(int(train_args.get("batch", 1)) * 2, 1)
+    )
+    imgsz = (
+        imgsz_override
+        if imgsz_override is not None
+        else int(train_args.get("imgsz", 640))
+    )
+    device = (
+        device_override
+        if device_override is not None
+        else (train_args.get("device") or "")
+    )
     split = train_args.get("split", "val")
 
     save_dir = output_dir / run_name
-    data_path, patched_channels = build_compatible_data_path(train_args["data"], model_channels, save_dir)
+    data_path, patched_channels = build_compatible_data_path(
+        train_args["data"], model_channels, save_dir
+    )
     validator_args = {
         "model": str(best_pt),
         "data": data_path,
@@ -281,11 +361,25 @@ def collect_curves(
     }
 
 
-def plot_combined_curve(records: list[dict], x_key: str, y_key: str, title: str, xlabel: str, ylabel: str, output_path: Path):
+def plot_combined_curve(
+    records: list[dict],
+    x_key: str,
+    y_key: str,
+    title: str,
+    xlabel: str,
+    ylabel: str,
+    output_path: Path,
+):
     fig, ax = plt.subplots(1, 1, figsize=(9, 6), tight_layout=True)
     for idx, record in enumerate(records):
         color = CURVE_COLORS[idx % len(CURVE_COLORS)]
-        ax.plot(record[x_key], record[y_key], linewidth=2, color=color, label=record["display_name"])
+        ax.plot(
+            record[x_key],
+            record[y_key],
+            linewidth=2,
+            color=color,
+            label=record["display_name"],
+        )
     ax.set_title(title)
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)

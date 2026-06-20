@@ -2,6 +2,8 @@ import argparse
 from pathlib import Path
 
 from ultralytics import RTDETR
+from ultralytics.nn.tasks import load_checkpoint
+from ultralytics.utils import LOGGER
 
 
 def parse_pretrained_arg(value: str | None):
@@ -15,12 +17,47 @@ def parse_pretrained_arg(value: str | None):
         return False
     return value
 
+def parse_resume_arg(value: str | None):
+    """Normalize CLI resume values into bool/path/None for Ultralytics."""
+    if value is None:
+        return None
+    lower = value.lower()
+    if lower == "true":
+        return True
+    if lower == "false":
+        return False
+    return value
+
+def resolve_resume_strategy(model_path: str, resume: bool | str | None, target_epochs: int):
+    """Convert finished-run resume requests into checkpoint fine-tuning."""
+    if not isinstance(resume, str):
+        return model_path, resume
+
+    resume_path = Path(resume)
+    if not resume_path.exists():
+        return model_path, resume
+
+    _, ckpt = load_checkpoint(resume_path, device="cpu", fuse=False)
+    start_epoch = ckpt.get("epoch", -1) + 1
+    completed_epochs = int(ckpt.get("train_args", {}).get("epochs", start_epoch) or start_epoch)
+    if start_epoch >= completed_epochs and target_epochs > start_epoch:
+        LOGGER.info(
+            "Checkpoint %s already completed %s epochs; starting a new training run from its weights to %s epochs.",
+            resume_path,
+            start_epoch,
+            target_epochs,
+        )
+        return str(resume_path), None
+
+    return model_path, resume
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Train RT-DETR model")
     parser.add_argument("--project", type=str, default="cst-sample-5k1k1k-s100", help="Project name for saving results")
     parser.add_argument("--name", type=str, default="rtdetr-pretrained", help="Experiment name for saving results")
     parser.add_argument("--model", type=str, default="rtdetr-l.yaml", help="Pretrained model to use")
     parser.add_argument("--epochs", type=int, default=30, help="Number of training epochs")
+    parser.add_argument("--patience", type=int, default=100, help="Early stopping patience in epochs")
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size for training")
     parser.add_argument("--imgsz", type=int, default=640, help="Image size for training")
     parser.add_argument("--device", type=str, default=None, help="Training device, e.g. 0 or cpu")
@@ -44,17 +81,25 @@ def parse_args():
         default=None,
         help="Optional checkpoint path or true/false. Leave unset to use model/YAML defaults.",
     )
+    parser.add_argument(
+        "--resume",
+        type=str,
+        default=None,
+        help="Optional checkpoint path or true/false for resuming training.",
+    )
     parser.add_argument("--exist-ok", action="store_true", default=False, help="Allow overwriting an existing run directory")
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
-    model_path = str(Path(args.model))
+    resume = parse_resume_arg(args.resume)
+    model_path, resume = resolve_resume_strategy(str(Path(args.model)), resume, args.epochs)
     yolo = RTDETR(model_path)
     train_kwargs = dict(
         data=args.dataset_path,
         epochs=args.epochs,
+        patience=args.patience,
         batch=args.batch_size,
         imgsz=args.imgsz,
         device=args.device,
@@ -80,6 +125,8 @@ if __name__ == "__main__":
     pretrained = parse_pretrained_arg(args.pretrained)
     if pretrained is not None:
         train_kwargs["pretrained"] = pretrained
+    if resume is not None:
+        train_kwargs["resume"] = resume
     yolo.train(**train_kwargs)
 
     # os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True,max_split_size_mb:128")
