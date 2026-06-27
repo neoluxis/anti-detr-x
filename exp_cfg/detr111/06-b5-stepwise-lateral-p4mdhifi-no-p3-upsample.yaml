@@ -1,0 +1,51 @@
+# B5 variant: corrected B5 topology, but remove the P3-stage top-down upsample.
+# P4 input_proj.1 -> MDHIFI -> Upsample -> top-down P4 fusion
+# P3 lateral -> MDHIFI -> P3m -> RepC3 directly for P3_out
+# P3m -> Down(A4) -> inject into P4 concat
+# P4m -> Down(A5) -> inject into P5 concat
+
+# Parameters
+nc: 80 # number of classes
+scales:
+  # [depth, width, max_channels]
+  l: [1.00, 1.00, 1024]
+
+backbone:
+  # [from, repeats, module, args]
+  - [-1, 1, TorchVision, [768, swin_v2_t, DEFAULT, True, 2, True]] # 0 torchvision backbone, split outputs enabled
+  - [0, 1, Index, [192, 3]] # 1 stage2 -> P3/8 (NHWC)
+  - [-1, 1, Permute, [0, 3, 1, 2]] # 2 P3 -> NCHW
+  - [-1, 1, EMA, [192]] # 3 P3 attention
+  - [0, 1, Index, [384, 5]] # 4 stage3 -> P4/16 (NHWC)
+  - [-1, 1, Permute, [0, 3, 1, 2]] # 5 P4 -> NCHW
+  - [-1, 1, EMA, [384]] # 6 P4 attention
+  - [0, 1, Index, [768, 7]] # 7 stage4 -> P5/32 (NHWC)
+  - [-1, 1, Permute, [0, 3, 1, 2]] # 8 P5 -> NCHW
+  - [-1, 1, EMA, [768]] # 9 P5 attention
+
+head:
+  - [-1, 1, Conv, [256, 1, 1, None, 1, 1, False]] # 10 input_proj.2
+  - [-1, 1, AIFI, [1024, 8]] # 11
+  - [-1, 1, Conv, [256, 1, 1]] # 12 Y5, lateral_convs.0
+
+  - [6, 1, Conv, [256, 1, 1, None, 1, 1, False]] # 13 input_proj.1
+  - [-1, 1, MDHIFI, [2048, 8, 3, 5, 4]] # 14 P4 enhancement/P4m
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]] # 15 Up(P4m)
+  - [[11, -1], 1, Concat, [1]] # 16 cat Up(Y5) + Up(P4m)
+  - [-1, 3, RepC3, [256]] # 17 top-down P4 feature
+  - [-1, 1, Conv, [256, 1, 1]] # 18 Y4, lateral_convs.1
+
+  - [3, 1, Conv, [256, 1, 1, None, 1, 1, False]] # 19 input_proj.0
+  - [-1, 1, MDHIFI, [2048, 8, 3, 5, 4]] # 20 P3 enhancement/P3m
+  - [-1, 3, RepC3, [256]] # 21 P3_out, no Up(Y4)
+
+  - [20, 1, Conv, [256, 3, 2, None, 1, 1, False]] # 22 A4: Down(P3m) -> P4 scale
+  - [[-1, 18], 1, Concat, [1]] # 23 cat A4 + Y4
+  - [-1, 3, RepC3, [256]] # 24 P4_out
+
+  - [14, 1, Conv, [256, 3, 2, None, 1, 1, False]] # 25 A5: Down(P4m) -> P5 scale
+  - [24, 1, Conv, [256, 3, 2]] # 26 Down(P4_out)
+  - [[-1, 12, 25], 1, Concat, [1]] # 27 cat Down(P4_out) + Y5 + A5
+  - [-1, 3, RepC3, [256]] # 28 P5_out
+
+  - [[21, 24, 28], 1, RTDETRDecoder, [nc]] # Detect(P3, P4, P5)
