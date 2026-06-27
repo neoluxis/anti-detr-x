@@ -82,6 +82,7 @@ from ultralytics.nn.modules import (
     HIFI,
     LayerNorm,
     MDHIFI,
+    Permute,
     SparseGlobalAttention,
     TorchVision,
     WTConv2d,

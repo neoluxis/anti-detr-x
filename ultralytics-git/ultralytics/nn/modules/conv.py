@@ -22,6 +22,7 @@ __all__ = (
     "GhostConv",
     "Index",
     "LightConv",
+    "Permute",
     "RepConv",
     "SpatialAttention",
 )
@@ -667,3 +668,14 @@ class Index(nn.Module):
             (torch.Tensor): Selected tensor.
         """
         return x[self.index]
+
+
+class Permute(nn.Module):
+    """Permute tensor dimensions to bridge layouts like NHWC -> NCHW."""
+
+    def __init__(self, *dims: int):
+        super().__init__()
+        self.dims = dims
+
+    def forward(self, x: torch.Tensor):
+        return x.permute(self.dims)

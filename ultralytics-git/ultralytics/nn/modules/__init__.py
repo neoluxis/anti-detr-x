@@ -92,6 +92,7 @@ from .conv import (
     GhostConv,
     Index,
     LightConv,
+    Permute,
     RepConv,
     SpatialAttention,
 )
@@ -199,6 +200,7 @@ __all__ = (
     "MSDeformAttn",
     "MaxSigmoidAttnBlock",
     "MDHIFI",
+    "Permute",
     "Pose",
     "Pose26",
     "Proto",

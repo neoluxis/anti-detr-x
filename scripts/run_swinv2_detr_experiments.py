@@ -30,6 +30,26 @@ EXPERIMENTS = {
             "model": "exp_cfg/detr/rtdetr-swinv2-tiny-last3-pretrained-ema-b2-p3-mdhifi-direct-repc3-p3-aux-p4-p4mdhifi.yaml",
             "freeze": 0,
         },
+        "b2-p3-mdhifi-direct-repc3-p3-aux-p4-lateral-mdhifi": {
+            "name": "rtdetr-swinv2-tiny-unfreeze-last3-ema-b2-p3-mdhifi-direct-repc3-p3-aux-p4-lateral-mdhifi-12k4k4k-e100",
+            "model": "exp_cfg/detr/rtdetr-swinv2-tiny-last3-pretrained-ema-b2-p3-mdhifi-direct-repc3-p3-aux-p4-lateral-mdhifi.yaml",
+            "freeze": 0,
+        },
+        "b2-p3-mdhifi-direct-repc3-p3-aux-p4-lateral-plain": {
+            "name": "rtdetr-swinv2-tiny-unfreeze-last3-ema-b2-p3-mdhifi-direct-repc3-p3-aux-p4-lateral-plain-12k4k4k-e100",
+            "model": "exp_cfg/detr/rtdetr-swinv2-tiny-last3-pretrained-ema-b2-p3-mdhifi-direct-repc3-p3-aux-p4-lateral-plain.yaml",
+            "freeze": 0,
+        },
+        "0621-b4-stepwise-lateral-plain": {
+            "name": "rtdetr-swinv2-tiny-unfreeze-last3-ema-b2-p3-mdhifi-0621-b4-stepwise-lateral-plain-12k4k4k-e100",
+            "model": "exp_cfg/detr/rtdetr-swinv2-tiny-last3-pretrained-ema-b2-p3-mdhifi-0621-b4-stepwise-lateral-plain.yaml",
+            "freeze": 0,
+        },
+        "0621-b5-stepwise-lateral-p4mdhifi": {
+            "name": "rtdetr-swinv2-tiny-unfreeze-last3-ema-b2-p3-mdhifi-0621-b5-stepwise-lateral-p4mdhifi-12k4k4k-e100",
+            "model": "exp_cfg/detr/rtdetr-swinv2-tiny-last3-pretrained-ema-b2-p3-mdhifi-0621-b5-stepwise-lateral-p4mdhifi.yaml",
+            "freeze": 0,
+        },
         "b3-p3-hifi": {
             "name": "rtdetr-swinv2-tiny-unfreeze-last3-ema-b3-p3-hifi-12k4k4k-e100",
             "model": "exp_cfg/detr/rtdetr-swinv2-tiny-last3-pretrained-ema-b3-p3-hifi.yaml",
@@ -96,6 +116,10 @@ def parse_args():
             "tiny/b1-aifi-mdhifi",
             "tiny/b2-p3-mdhifi",
             "tiny/b2-p3-mdhifi-direct-repc3-p3-aux-p4-p4mdhifi",
+            "tiny/b2-p3-mdhifi-direct-repc3-p3-aux-p4-lateral-mdhifi",
+            "tiny/b2-p3-mdhifi-direct-repc3-p3-aux-p4-lateral-plain",
+            "tiny/0621-b4-stepwise-lateral-plain",
+            "tiny/0621-b5-stepwise-lateral-p4mdhifi",
             "tiny/b3-p3-hifi",
             "tiny/b3-p3-aifi",
             "tiny/ema-wtconv-biagcau-mdhifi",

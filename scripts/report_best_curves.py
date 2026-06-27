@@ -109,18 +109,21 @@ DEFAULT_MODELS = {
     # "rtdetr-resnet50-unfreeze-last3": "rtdetr-resnet50-unfreeze-last3",
     # "rtdetr-resnet50-freeze-last3-ema": "rtdetr-resnet50-freeze-last3-ema",
     # "rtdetr-resnet50-freeze-last3": "rtdetr-resnet50-freeze-last3",
-    "rtdetr-resnet101-unfreeze-last3-ema-12k4k4k": "rtdetr-resnet101-unfreeze-last3-ema-12k4k4k",
-    "rtdetr-resnet50-unfreeze-last3-ema-12k4k4k": "rtdetr-resnet50-unfreeze-last3-ema-12k4k4k",
-    "rtdetr-resnet50-unfreeze-last3-12k4k4k": "rtdetr-resnet50-unfreeze-last3-12k4k4k",
-    "rtdetr-resnet101-unfreeze-last3-12k4k4k": "rtdetr-resnet101-unfreeze-last3-12k4k4k-2",
-    "rtdetr-resnet101-unfreeze-last3-ema-12k4k4k-e100": "rtdetr-resnet101-unfreeze-last3-ema-12k4k4k-e100",
-    "rtdetr-resnet50-unfreeze-last3-ema-12k4k4k-e100": "rtdetr-resnet50-unfreeze-last3-ema-12k4k4k-e100",
-    "rtdetr-swinv2-small-unfreeze-last3-12k4k4k-e100": "rtdetr-swinv2-small-unfreeze-last3-12k4k4k-e100",
-    "rtdetr-swinv2-small-unfreeze-last3-ema-12k4k4k-e100": "rtdetr-swinv2-small-unfreeze-last3-ema-12k4k4k-e100",
-    "rtdetr-swinv2-tiny-unfreeze-last3-12k4k4k-e100": "rtdetr-swinv2-tiny-unfreeze-last3-12k4k4k-e100-2",
-    "rtdetr-swinv2-tiny-unfreeze-last3-12k4k4k-ema-e100": "rtdetr-swinv2-tiny-unfreeze-last3-ema-12k4k4k-e100-2",
-    "rtdetr-resnet101-unfreeze-last3-ema-wtconv-biagcau-mdhifi-12k4k4k-e100": "rtdetr-resnet101-unfreeze-last3-ema-wtconv-biagcau-mdhifi-12k4k4k-e100",
-    "rtdetr-swinv2-tiny-unfreeze-last3-ema-wtconv-biagcau-mdhifi-12k4k4k-e100": "rtdetr-swinv2-tiny-unfreeze-last3-ema-wtconv-biagcau-mdhifi-12k4k4k-e100",
+    # "rtdetr-resnet101-unfreeze-last3-ema-12k4k4k": "rtdetr-resnet101-unfreeze-last3-ema-12k4k4k",
+    # "rtdetr-resnet50-unfreeze-last3-ema-12k4k4k": "rtdetr-resnet50-unfreeze-last3-ema-12k4k4k",
+    # "rtdetr-resnet50-unfreeze-last3-12k4k4k": "rtdetr-resnet50-unfreeze-last3-12k4k4k",
+    # "rtdetr-resnet101-unfreeze-last3-12k4k4k": "rtdetr-resnet101-unfreeze-last3-12k4k4k-2",
+    # "rtdetr-resnet101-unfreeze-last3-ema-12k4k4k-e100": "rtdetr-resnet101-unfreeze-last3-ema-12k4k4k-e100",
+    # "rtdetr-resnet50-unfreeze-last3-ema-12k4k4k-e100": "rtdetr-resnet50-unfreeze-last3-ema-12k4k4k-e100",
+    # "rtdetr-swinv2-small-unfreeze-last3-12k4k4k-e100": "rtdetr-swinv2-small-unfreeze-last3-12k4k4k-e100",
+    # "rtdetr-swinv2-small-unfreeze-last3-ema-12k4k4k-e100": "rtdetr-swinv2-small-unfreeze-last3-ema-12k4k4k-e100",
+    # "rtdetr-swinv2-tiny-unfreeze-last3-12k4k4k-e100": "rtdetr-swinv2-tiny-unfreeze-last3-12k4k4k-e100-2",
+    # "rtdetr-swinv2-tiny-unfreeze-last3-12k4k4k-ema-e100": "rtdetr-swinv2-tiny-unfreeze-last3-ema-12k4k4k-e100-2",
+    # "rtdetr-resnet101-unfreeze-last3-ema-wtconv-biagcau-mdhifi-12k4k4k-e100": "rtdetr-resnet101-unfreeze-last3-ema-wtconv-biagcau-mdhifi-12k4k4k-e100",
+    # "rtdetr-swinv2-tiny-unfreeze-last3-ema-wtconv-biagcau-mdhifi-12k4k4k-e100": "rtdetr-swinv2-tiny-unfreeze-last3-ema-wtconv-biagcau-mdhifi-12k4k4k-e100",
+
+# // DETR111
+    "rtdetr-swinv2-tiny-detr111-07-b5-no-p4mdhifi-12k4k4k-e100": "rtdetr-swinv2-tiny-detr111-07-b5-no-p4mdhifi-12k4k4k-e100",
 }
 
 CURVE_COLORS = gencolors(len(DEFAULT_MODELS))
@@ -132,7 +135,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--project-path",
         type=Path,
-        default=Path("runs/detect/cst-sample-12k4k4k-s100"),
+        default=Path("runs/detect/cst-sample-12k4k4k-s100-detr111-b5fix"),
         help="Project folder that contains multiple run directories.",
     )
     parser.add_argument(
@@ -326,6 +329,8 @@ def collect_curves(
         "mode": "val",
     }
     validator = validator_cls(save_dir=save_dir, args=validator_args)
+    validator.plot_val_samples = lambda *args, **kwargs: None
+    validator.plot_predictions = lambda *args, **kwargs: None
     stats = validator(model=model.model)
 
     plot_data = {}
