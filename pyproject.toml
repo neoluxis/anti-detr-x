@@ -58,6 +58,10 @@ dependencies = [
     "tqdm~=4.66.6",
     "transformers~=4.47.0",
     "typing-extensions~=4.12.2",
+    "ultralytics",
     "urllib3~=1.26.20",
     "wandb~=0.18.5",
 ]
+
+[tool.uv.sources]
+ultralytics = { path = "ultralytics-git", editable = true }

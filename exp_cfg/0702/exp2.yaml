@@ -1,0 +1,78 @@
+# Experiment 2 (0702): Derived from 0630/exp5, HFSCC P3 branch no C3 gate.
+# Ablation: 从0630/exp5派生，HFSCC内部 P3 分支去掉 C3 gate
+#
+# HFSCC 内部公式变化：
+#   exp5 原版:
+#     C3 = Up(C4)
+#     P3c = F3 + gamma3 * C3 * Delta3
+#   exp2 (本实验):
+#     C3 = 1  (无gate)
+#     P3c = F3 + gamma3 * Delta3
+#   P4/P5 保持不变:
+#     P4c = F4 + gamma4 * C4 * Delta4 - beta4 * (1 - C4) * N4
+#     P5c = F5 + gamma5 * C5 * Delta5 - beta5 * (1 - C5) * N5
+#
+# Architecture:
+#   P5 proj → AIFI → Y5
+#   P4 proj → P4m                                  (no MDHIFI on P4)
+#   P3 proj → MDHIFI → P3m
+#   HFSCC([P3m, P4m, Y5]) → [P3c, P4c, P5c]     (noise suppression ON, P3 no C3 gate)
+#   P5c --Up--> Concat(P4c) → RepC3 → Y4 proj   (P4 upsample kept)
+#   P3c → RepC3 → P3_out                         (P3 upsample removed)
+#   P3_out --Down--> Concat(Y4_proj, P4c) → P4_out
+#   P4_out --Down--> Concat(P5c) → P5_out
+
+# Parameters
+nc: 80 # number of classes
+scales:
+  # [depth, width, max_channels]
+  l: [1.00, 1.00, 1024]
+
+backbone:
+  # [from, repeats, module, args]
+  - [-1, 1, TorchVision, [768, swin_v2_t, DEFAULT, True, 2, True]] # 0 torchvision backbone, split outputs enabled
+  - [0, 1, Index, [192, 3]] # 1 stage2 -> P3/8 (NHWC)
+  - [-1, 1, Permute, [0, 3, 1, 2]] # 2 P3 -> NCHW
+  - [-1, 1, EMA, [192]] # 3 P3 attention
+  - [0, 1, Index, [384, 5]] # 4 stage3 -> P4/16 (NHWC)
+  - [-1, 1, Permute, [0, 3, 1, 2]] # 5 P4 -> NCHW
+  - [-1, 1, EMA, [384]] # 6 P4 attention
+  - [0, 1, Index, [768, 7]] # 7 stage4 -> P5/32 (NHWC)
+  - [-1, 1, Permute, [0, 3, 1, 2]] # 8 P5 -> NCHW
+  - [-1, 1, EMA, [768]] # 9 P5 attention
+
+head:
+  - [9, 1, Conv, [256, 1, 1, None, 1, 1, False]] # 10 P5 proj
+  - [-1, 1, AIFI, [1024, 8]] # 11
+  - [-1, 1, Conv, [256, 1, 1]] # 12 Y5
+
+  - [6, 1, Conv, [256, 1, 1, None, 1, 1, False]] # 13 P4 proj / P4m
+
+  - [3, 1, Conv, [256, 1, 1, None, 1, 1, False]] # 14 P3 proj
+  - [-1, 1, MDHIFI, [2048, 8, 3, 5, 4]] # 15 P3m
+
+  - [[15, 13, 12], 1, HFSCC, [4, 3, "shift", True, False]] # 16 -> P3c (no C3 gate), P4c, P5c
+  - [16, 1, Index, [256, 0]] # 17 P3c
+  - [16, 1, Index, [256, 1]] # 18 P4c
+  - [16, 1, Index, [256, 2]] # 19 P5c
+
+  # P4 upsample kept: P5c → Up → Concat(P4c) → Y4
+  - [19, 1, nn.Upsample, [None, 2, "nearest"]] # 20 Up(P5c)
+  - [[-1, 18], 1, Concat, [1]] # 21 cat Up(P5c) + P4c
+  - [-1, 3, RepC3, [256]] # 22 Y4
+  - [-1, 1, Conv, [256, 1, 1]] # 23 Y4 proj
+
+  # P3 upsample removed: P3c directly → P3_out
+  - [17, 3, RepC3, [256]] # 24 P3_out
+
+  # Bottom-up: P3_out → Down → Concat(Y4_proj, P4c) → P4_out
+  - [-1, 1, Conv, [256, 3, 2, None, 1, 1, False]] # 25 Down(P3_out)
+  - [[-1, 23, 18], 1, Concat, [1]] # 26 cat Down(P3_out) + Y4_proj + P4c
+  - [-1, 3, RepC3, [256]] # 27 P4_out
+
+  # Bottom-up: P4_out → Down → Concat(P5c) → P5_out
+  - [-1, 1, Conv, [256, 3, 2, None, 1, 1, False]] # 28 Down(P4_out)
+  - [[-1, 19], 1, Concat, [1]] # 29 cat Down(P4_out) + P5c
+  - [-1, 3, RepC3, [256]] # 30 P5_out
+
+  - [[24, 27, 30], 1, RTDETRDecoder, [nc]] # Detect(P3, P4, P5)
