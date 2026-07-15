@@ -18,9 +18,12 @@ __all__ = (
     "Blocks",
     "Conv2d_BN",
     "ConvNormLayer",
+    "DWGConv",
     "DynamicWTConv2d",
+    "HFSCC",
     "HIFI",
     "LayerNorm",
+    "LiteMDHIFI",
     "MDHIFI",
     "SparseGlobalAttention",
     "WTConv2d",
@@ -449,6 +452,39 @@ class SparseGlobalAttention(nn.Module):
         spatial_mask = self.spatial_gate(torch.cat([avg_map, max_map], dim=1))
         x = self.channel_gate(x)
         return self.proj(x * spatial_mask)
+
+
+class DWGConv(nn.Module):
+    """Depth-wise Gated Convolution with noise suppression and residual connection.
+
+    Lightweight block: DWConv(3x3) -> Gate(SE-like) -> Residual.
+    Designed to refine P2 features after 1x1 projection, suppressing high-frequency
+    noise before fusion with upsampled Y3 features in the FPN.
+
+    Architecture:
+        x -> DWConv(3x3, groups=c1) -> SE-Gate -> 1x1 Proj ─┬─> out
+        x ───────────> 1x1 Short ────────────────────────────┘
+    """
+
+    def __init__(self, c1, c2, k=3, reduction=4):
+        super().__init__()
+        self.dwconv = nn.Conv2d(c1, c1, k, padding=k // 2, groups=c1, bias=False)
+        hidden = max(c1 // reduction, 8)
+        self.gate = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(c1, hidden, 1, bias=True),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(hidden, c1, 1, bias=True),
+            nn.Sigmoid(),
+        )
+        self.proj = nn.Conv2d(c1, c2, 1, bias=False) if c1 != c2 else nn.Identity()
+        self.short = nn.Conv2d(c1, c2, 1, bias=False) if c1 != c2 else nn.Identity()
+
+    def forward(self, x):
+        out = self.dwconv(x)
+        out = out * self.gate(out)
+        out = self.proj(out)
+        return out + self.short(x)
 
 
 def create_wavelet_filter(wave, in_size, out_size, type=torch.float):
@@ -881,3 +917,231 @@ class MDHIFI(nn.Module):
 
     def forward(self, src, src_mask=None, src_key_padding_mask=None, pos=None):
         return self.forward_post(src, src_mask, src_key_padding_mask, pos)
+
+
+class LiteMDHIFI(nn.Module):
+    """Lite variant of MDHIFI without the Histogram self-attention branch.
+
+    Retains only the gradient (Sobel) and texture branches with a learned noise gate and FFN.
+    """
+
+    def __init__(
+        self,
+        c1,
+        cm=2048,
+        num_heads=8,
+        grad_kernel=3,
+        texture_kernel=5,
+        noise_reduction=4,
+        dropout=0.0,
+        act=nn.GELU(),
+        normalize_before=False,
+    ):
+        super().__init__()
+        # NOTE: no Attention_histogram branch — lite variant
+        self.edge_proj = nn.Conv2d(c1, c1, 1, bias=False)
+        self.texture_proj = nn.Conv2d(c1, c1, 1, bias=False)
+        self.texture_pool = nn.AvgPool2d(texture_kernel, stride=1, padding=texture_kernel // 2)
+        hidden = max(c1 // noise_reduction, 8)
+        self.noise_gate = nn.Sequential(
+            nn.Conv2d(c1 * 2, hidden, 1, bias=True),  # only grad + texture (no hist)
+            nn.ReLU(inplace=True),
+            nn.Conv2d(hidden, c1, 1, bias=True),
+            nn.Sigmoid(),
+        )
+        self.fc1 = nn.Conv2d(c1, cm, 1)
+        self.fc2 = nn.Conv2d(cm, c1, 1)
+        self.norm1 = LayerNorm(c1)
+        self.norm2 = LayerNorm(c1)
+        self.dropout = nn.Dropout(dropout)
+        self.dropout1 = nn.Dropout(dropout)
+        self.dropout2 = nn.Dropout(dropout)
+        self.act = act
+        self.normalize_before = normalize_before
+
+        sobel_x = torch.tensor([[1.0, 0.0, -1.0], [2.0, 0.0, -2.0], [1.0, 0.0, -1.0]], dtype=torch.float32)
+        sobel_y = torch.tensor([[1.0, 2.0, 1.0], [0.0, 0.0, 0.0], [-1.0, -2.0, -1.0]], dtype=torch.float32)
+        self.register_buffer("sobel_x", sobel_x.view(1, 1, grad_kernel, grad_kernel), persistent=False)
+        self.register_buffer("sobel_y", sobel_y.view(1, 1, grad_kernel, grad_kernel), persistent=False)
+
+    def _gradient_branch(self, x):
+        channels = x.shape[1]
+        weight_x = self.sobel_x.expand(channels, 1, -1, -1).to(dtype=x.dtype, device=x.device)
+        weight_y = self.sobel_y.expand(channels, 1, -1, -1).to(dtype=x.dtype, device=x.device)
+        grad_x = F.conv2d(x, weight_x, padding=1, groups=channels)
+        grad_y = F.conv2d(x, weight_y, padding=1, groups=channels)
+        grad = torch.sqrt(grad_x.square() + grad_y.square() + 1e-6)
+        return self.edge_proj(grad)
+
+    def _texture_branch(self, x):
+        pooled = self.texture_pool(x)
+        texture = torch.abs(x - pooled)
+        return self.texture_proj(texture)
+
+    def forward_post(self, src, src_mask=None, src_key_padding_mask=None, pos=None):
+        grad = self._gradient_branch(src)
+        texture = self._texture_branch(src)
+        gate = self.noise_gate(torch.cat([grad, texture], dim=1))
+        src2 = gate * (grad + texture)
+        src = src + self.dropout1(src2)
+        src = self.norm1(src)
+        src2 = self.fc2(self.dropout(self.act(self.fc1(src))))
+        src = src + self.dropout2(src2)
+        return self.norm2(src)
+
+    def forward(self, src, src_mask=None, src_key_padding_mask=None, pos=None):
+        return self.forward_post(src, src_mask, src_key_padding_mask, pos)
+
+
+class _DepthwiseSmoothing(nn.Module):
+    def __init__(self, channels, kernel_size=3):
+        super().__init__()
+        self.conv = nn.Conv2d(
+            channels,
+            channels,
+            kernel_size,
+            stride=1,
+            padding=kernel_size // 2,
+            groups=channels,
+            bias=False,
+        )
+        nn.init.constant_(self.conv.weight, 1.0 / (kernel_size * kernel_size))
+
+    def forward(self, x):
+        return self.conv(x)
+
+
+class _ShiftAlign(nn.Module):
+    def __init__(self, channels, shifts=1):
+        super().__init__()
+        self.shifts = shifts
+        self.num_offsets = (2 * shifts + 1) ** 2
+        self.predict = nn.Sequential(
+            nn.Conv2d(channels * 3, channels, 1, bias=False),
+            nn.BatchNorm2d(channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(channels, self.num_offsets, 1, bias=True),
+        )
+
+    def forward(self, source, target):
+        logits = self.predict(torch.cat([source, target, source - target], dim=1))
+        weights = torch.softmax(logits, dim=1)
+        aligned = 0.0
+        idx = 0
+        for dy in range(-self.shifts, self.shifts + 1):
+            for dx in range(-self.shifts, self.shifts + 1):
+                shifted = torch.roll(source, shifts=(dy, dx), dims=(-2, -1))
+                aligned = aligned + shifted * weights[:, idx : idx + 1]
+                idx += 1
+        return aligned
+
+
+class _CompensationHead(nn.Module):
+    def __init__(self, channels, hidden_channels):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Conv2d(channels, hidden_channels, 1, bias=False),
+            nn.BatchNorm2d(hidden_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(hidden_channels, hidden_channels, 3, padding=1, groups=hidden_channels, bias=False),
+            nn.BatchNorm2d(hidden_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(hidden_channels, hidden_channels, 1, bias=False),
+            nn.BatchNorm2d(hidden_channels),
+            nn.ReLU(inplace=True),
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+
+class HFSCC(nn.Module):
+    def __init__(self, c1, cm=4, smooth_kernel=3, align_mode="shift", use_noise_suppression=True, use_p3_gate=True):
+        super().__init__()
+        if align_mode != "shift":
+            raise ValueError(f"HFSCC only supports align_mode='shift', but got {align_mode!r}.")
+
+        hidden = max(int(c1 // max(cm, 1)), 8)
+        pair_channels = c1 * 4
+        self.use_noise_suppression = use_noise_suppression
+        self.use_p3_gate = use_p3_gate
+        self.smooth3 = _DepthwiseSmoothing(c1, smooth_kernel)
+        self.smooth4 = _DepthwiseSmoothing(c1, smooth_kernel)
+        self.smooth5 = _DepthwiseSmoothing(c1, smooth_kernel)
+        self.down34 = nn.Sequential(
+            nn.AvgPool2d(2, stride=2),
+            nn.Conv2d(c1, c1, 1, bias=False),
+            nn.BatchNorm2d(c1),
+        )
+        self.down45 = nn.Sequential(
+            nn.AvgPool2d(2, stride=2),
+            nn.Conv2d(c1, c1, 1, bias=False),
+            nn.BatchNorm2d(c1),
+        )
+        self.align4 = _ShiftAlign(c1)
+        self.align5 = _ShiftAlign(c1)
+        self.consistency4 = nn.Sequential(
+            nn.Conv2d(pair_channels, hidden, 1, bias=True),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(hidden, c1, 1, bias=True),
+            nn.Sigmoid(),
+        )
+        self.consistency5 = nn.Sequential(
+            nn.Conv2d(pair_channels, hidden, 1, bias=True),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(hidden, c1, 1, bias=True),
+            nn.Sigmoid(),
+        )
+        self.delta3 = _CompensationHead(c1 * 3, c1)
+        self.delta4 = _CompensationHead(pair_channels, c1)
+        self.delta5 = _CompensationHead(pair_channels, c1)
+        if use_noise_suppression:
+            self.noise4 = _CompensationHead(pair_channels, c1)
+            self.noise5 = _CompensationHead(pair_channels, c1)
+            self.beta4 = nn.Parameter(torch.zeros(1, c1, 1, 1))
+            self.beta5 = nn.Parameter(torch.zeros(1, c1, 1, 1))
+        self.gamma3 = nn.Parameter(torch.full((1, c1, 1, 1), 1e-2))
+        self.gamma4 = nn.Parameter(torch.full((1, c1, 1, 1), 1e-2))
+        self.gamma5 = nn.Parameter(torch.full((1, c1, 1, 1), 1e-2))
+
+    @staticmethod
+    def _pair_features(aligned, current):
+        return torch.cat([aligned, current, torch.abs(aligned - current), aligned * current], dim=1)
+
+    def forward(self, x):
+        f3, f4, f5 = x
+        use_p3_gate = getattr(self, "use_p3_gate", True)
+        use_noise_suppression = getattr(self, "use_noise_suppression", False)
+        r3 = f3 - self.smooth3(f3)
+        r4 = f4 - self.smooth4(f4)
+        r5 = f5 - self.smooth5(f5)
+
+        r34 = self.down34(r3)
+        r45 = self.down45(r4)
+        r34_aligned = self.align4(r34, r4)
+        r45_aligned = self.align5(r45, r5)
+
+        e4 = self._pair_features(r34_aligned, r4)
+        e5 = self._pair_features(r45_aligned, r5)
+        c4 = self.consistency4(e4)
+        c5 = self.consistency5(e5)
+        c3 = F.interpolate(c4, size=f3.shape[-2:], mode="nearest")
+
+        d3 = self.delta3(torch.cat([f3, r3, c3], dim=1))
+        d4 = self.delta4(e4)
+        d5 = self.delta5(e5)
+
+        if use_p3_gate:
+            p3 = f3 + self.gamma3 * c3 * d3
+        else:
+            p3 = f3 + self.gamma3 * d3
+        p4 = f4 + self.gamma4 * c4 * d4
+        p5 = f5 + self.gamma5 * c5 * d5
+
+        if use_noise_suppression:
+            n4 = self.noise4(e4)
+            n5 = self.noise5(e5)
+            p4 = p4 - self.beta4 * (1.0 - c4) * n4
+            p5 = p5 - self.beta5 * (1.0 - c5) * n5
+
+        return [p3, p4, p5]

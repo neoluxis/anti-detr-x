@@ -109,6 +109,10 @@ def bbox_iou(
     GIoU: bool = False,
     DIoU: bool = False,
     CIoU: bool = False,
+    SIoU: bool = False,
+    InnerIoU: bool = False,
+    InnerSIoU: bool = False,
+    ratio: float = 1.0,
     eps: float = 1e-7,
 ) -> torch.Tensor:
     """Calculate the Intersection over Union (IoU) between bounding boxes.
@@ -125,10 +129,14 @@ def bbox_iou(
         GIoU (bool, optional): If True, calculate Generalized IoU.
         DIoU (bool, optional): If True, calculate Distance IoU.
         CIoU (bool, optional): If True, calculate Complete IoU.
+        SIoU (bool, optional): If True, calculate SCYLLA IoU.
+        InnerIoU (bool, optional): If True, calculate Inner-CIoU (CIoU on inner-scaled boxes).
+        InnerSIoU (bool, optional): If True, calculate Inner-SIoU (SIoU on inner-scaled boxes).
+        ratio (float, optional): Scale factor for inner box. 1.0 = full box, <1.0 = inner region. Defaults to 1.0.
         eps (float, optional): A small value to avoid division by zero.
 
     Returns:
-        (torch.Tensor): IoU, GIoU, DIoU, or CIoU values depending on the specified flags.
+        (torch.Tensor): IoU, GIoU, DIoU, CIoU, SIoU, Inner-CIoU, or Inner-SIoU values depending on flags.
     """
     # Get the coordinates of bounding boxes
     if xywh:  # transform from xywh to xyxy
@@ -142,6 +150,19 @@ def bbox_iou(
         w1, h1 = b1_x2 - b1_x1, b1_y2 - b1_y1 + eps
         w2, h2 = b2_x2 - b2_x1, b2_y2 - b2_y1 + eps
 
+    # Inner-IoU: compute auxiliary inner box coordinates scaled by ratio
+    if InnerIoU or InnerSIoU:
+        iw1, ih1 = (b1_x2 - b1_x1) / 2, (b1_y2 - b1_y1) / 2
+        iw2, ih2 = (b2_x2 - b2_x1) / 2, (b2_y2 - b2_y1) / 2
+        inner_b1_x1 = (b1_x1 + b1_x2) / 2 - iw1 * ratio
+        inner_b1_x2 = (b1_x1 + b1_x2) / 2 + iw1 * ratio
+        inner_b1_y1 = (b1_y1 + b1_y2) / 2 - ih1 * ratio
+        inner_b1_y2 = (b1_y1 + b1_y2) / 2 + ih1 * ratio
+        inner_b2_x1 = (b2_x1 + b2_x2) / 2 - iw2 * ratio
+        inner_b2_x2 = (b2_x1 + b2_x2) / 2 + iw2 * ratio
+        inner_b2_y1 = (b2_y1 + b2_y2) / 2 - ih2 * ratio
+        inner_b2_y2 = (b2_y1 + b2_y2) / 2 + ih2 * ratio
+
     # Intersection area
     inter = (b1_x2.minimum(b2_x2) - b1_x1.maximum(b2_x1)).clamp_(0) * (
         b1_y2.minimum(b2_y2) - b1_y1.maximum(b2_y1)
@@ -152,6 +173,76 @@ def bbox_iou(
 
     # IoU
     iou = inter / union
+
+    # Inner-CIoU: IoU on inner-scaled boxes with CIoU penalty on original boxes
+    if InnerIoU:
+        inner_inter = (
+            inner_b1_x2.minimum(inner_b2_x2) - inner_b1_x1.maximum(inner_b2_x1)
+        ).clamp_(0) * (inner_b1_y2.minimum(inner_b2_y2) - inner_b1_y1.maximum(inner_b2_y1)).clamp_(0)
+        inner_union = (b1_x2 - b1_x1) * ratio * (b1_y2 - b1_y1) * ratio + (
+            b2_x2 - b2_x1
+        ) * ratio * (b2_y2 - b2_y1) * ratio - inner_inter + eps
+        inner_iou = inner_inter / inner_union
+        # CIoU penalty on original boxes
+        cw = b1_x2.maximum(b2_x2) - b1_x1.minimum(b2_x1)
+        ch = b1_y2.maximum(b2_y2) - b1_y1.minimum(b2_y1)
+        c2 = cw.pow(2) + ch.pow(2) + eps
+        rho2 = ((b2_x1 + b2_x2 - b1_x1 - b1_x2).pow(2) + (b2_y1 + b2_y2 - b1_y1 - b1_y2).pow(2)) / 4
+        v = (4 / math.pi**2) * ((w2 / h2).atan() - (w1 / h1).atan()).pow(2)
+        with torch.no_grad():
+            alpha = v / (v - iou + (1 + eps))
+        return inner_iou - (rho2 / c2 + v * alpha)  # Inner-CIoU
+
+    # Inner-SIoU: IoU on inner-scaled boxes with SIoU penalty on original boxes
+    if InnerSIoU:
+        inner_inter = (
+            inner_b1_x2.minimum(inner_b2_x2) - inner_b1_x1.maximum(inner_b2_x1)
+        ).clamp_(0) * (inner_b1_y2.minimum(inner_b2_y2) - inner_b1_y1.maximum(inner_b2_y1)).clamp_(0)
+        inner_union = (b1_x2 - b1_x1) * ratio * (b1_y2 - b1_y1) * ratio + (
+            b2_x2 - b2_x1
+        ) * ratio * (b2_y2 - b2_y1) * ratio - inner_inter + eps
+        inner_iou = inner_inter / inner_union
+        # SIoU penalty on original boxes
+        cw = b1_x2.maximum(b2_x2) - b1_x1.minimum(b2_x1)
+        ch = b1_y2.maximum(b2_y2) - b1_y1.minimum(b2_y1)
+        s_cw = (b2_x1 + b2_x2 - b1_x1 - b1_x2) * 0.5 + eps
+        s_ch = (b2_y1 + b2_y2 - b1_y1 - b1_y2) * 0.5 + eps
+        sigma = (s_cw.pow(2) + s_ch.pow(2)).sqrt()
+        sin_alpha_1 = s_cw.abs() / sigma
+        sin_alpha_2 = s_ch.abs() / sigma
+        threshold = 2**0.5 / 2
+        sin_alpha = torch.where(sin_alpha_1 > threshold, sin_alpha_2, sin_alpha_1)
+        angle_cost = torch.cos(torch.arcsin(sin_alpha) * 2 - math.pi / 2)
+        rho_x = (s_cw / cw).pow(2)
+        rho_y = (s_ch / ch).pow(2)
+        gamma = angle_cost - 2
+        distance_cost = 2 - torch.exp(gamma * rho_x) - torch.exp(gamma * rho_y)
+        omiga_w = (b1_x2 - b1_x1 - (b2_x2 - b2_x1)).abs() / (b1_x2 - b1_x1).maximum(b2_x2 - b2_x1)
+        omiga_h = (b1_y2 - b1_y1 - (b2_y2 - b2_y1)).abs() / (b1_y2 - b1_y1).maximum(b2_y2 - b2_y1)
+        shape_cost = (1 - torch.exp(-1 * omiga_w)).pow(4) + (1 - torch.exp(-1 * omiga_h)).pow(4)
+        return inner_iou - 0.5 * (distance_cost + shape_cost)  # Inner-SIoU
+
+    # Standard SIoU
+    if SIoU:
+        cw = b1_x2.maximum(b2_x2) - b1_x1.minimum(b2_x1)
+        ch = b1_y2.maximum(b2_y2) - b1_y1.minimum(b2_y1)
+        s_cw = (b2_x1 + b2_x2 - b1_x1 - b1_x2) * 0.5 + eps
+        s_ch = (b2_y1 + b2_y2 - b1_y1 - b1_y2) * 0.5 + eps
+        sigma = (s_cw.pow(2) + s_ch.pow(2)).sqrt()
+        sin_alpha_1 = s_cw.abs() / sigma
+        sin_alpha_2 = s_ch.abs() / sigma
+        threshold = 2**0.5 / 2
+        sin_alpha = torch.where(sin_alpha_1 > threshold, sin_alpha_2, sin_alpha_1)
+        angle_cost = torch.cos(torch.arcsin(sin_alpha) * 2 - math.pi / 2)
+        rho_x = (s_cw / cw).pow(2)
+        rho_y = (s_ch / ch).pow(2)
+        gamma = angle_cost - 2
+        distance_cost = 2 - torch.exp(gamma * rho_x) - torch.exp(gamma * rho_y)
+        omiga_w = (b1_x2 - b1_x1 - (b2_x2 - b2_x1)).abs() / (b1_x2 - b1_x1).maximum(b2_x2 - b2_x1)
+        omiga_h = (b1_y2 - b1_y1 - (b2_y2 - b2_y1)).abs() / (b1_y2 - b1_y1).maximum(b2_y2 - b2_y1)
+        shape_cost = (1 - torch.exp(-1 * omiga_w)).pow(4) + (1 - torch.exp(-1 * omiga_h)).pow(4)
+        return iou - 0.5 * (distance_cost + shape_cost)  # SIoU
+
     if CIoU or DIoU or GIoU:
         cw = b1_x2.maximum(b2_x2) - b1_x1.minimum(b2_x1)  # convex (smallest enclosing box) width
         ch = b1_y2.maximum(b2_y2) - b1_y1.minimum(b2_y1)  # convex height

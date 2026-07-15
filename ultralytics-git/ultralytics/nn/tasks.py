@@ -54,6 +54,7 @@ from ultralytics.nn.modules import (
     Conv2d_BN,
     ConvNormLayer,
     ConvTranspose,
+    DWGConv,
     Detect,
     DynamicWTConv2d,
     DWConv,
@@ -79,8 +80,10 @@ from ultralytics.nn.modules import (
     Segment,
     Segment26,
     SemanticSegment,
+    HFSCC,
     HIFI,
     LayerNorm,
+    LiteMDHIFI,
     MDHIFI,
     Permute,
     SparseGlobalAttention,
@@ -860,7 +863,12 @@ class RTDETRDetectionModel(DetectionModel):
         """Initialize the loss criterion for the RTDETRDetectionModel."""
         from ultralytics.models.utils.loss import RTDETRDetectionLoss
 
-        return RTDETRDetectionLoss(nc=self.nc, use_vfl=True)
+        return RTDETRDetectionLoss(
+            nc=self.nc,
+            use_vfl=True,
+            iou_type=getattr(self.args, "iou_type", "giou"),
+            inner_ratio=getattr(self.args, "inner_ratio", 1.0),
+        )
 
     def loss(self, batch, preds=None):
         """Compute the loss for the given batch of data.
@@ -1705,6 +1713,7 @@ def parse_model(d, ch, verbose=True):
             C2fPSA,
             C2PSA,
             DWConv,
+            DWGConv,
             Focus,
             BottleneckCSP,
             C1,
@@ -1800,8 +1809,11 @@ def parse_model(d, ch, verbose=True):
             args = [ch[f], *args]
         elif m is AIFI:
             args = [ch[f], *args]
-        elif m in {HIFI, MDHIFI}:
+        elif m in {HIFI, MDHIFI, LiteMDHIFI}:
             args = [ch[f], *args]
+        elif m is HFSCC:
+            c2 = ch[f[0]]
+            args = [c2, *args]
         elif m in frozenset({HGStem, HGBlock}):
             c1, cm, c2 = ch[f], args[0], args[1]
             args = [c1, cm, c2, *args[2:]]

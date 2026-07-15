@@ -45,6 +45,8 @@ class DETRLoss(nn.Module):
         uni_match_ind: int = 0,
         gamma: float = 1.5,
         alpha: float = 0.25,
+        iou_type: str = "giou",
+        inner_ratio: float = 1.0,
     ):
         """Initialize DETR loss function with customizable components and gains.
 
@@ -61,6 +63,8 @@ class DETRLoss(nn.Module):
             uni_match_ind (int): Index of fixed layer for uni_match.
             gamma (float): The focusing parameter that controls how much the loss focuses on hard-to-classify examples.
             alpha (float): The balancing factor used to address class imbalance.
+            iou_type (str): IoU loss type: ciou, diou, giou, siou, inner_ciou, inner_siou.
+            inner_ratio (float): Inner box scale factor for inner_iou variants, 0.0-1.0.
         """
         super().__init__()
 
@@ -76,6 +80,8 @@ class DETRLoss(nn.Module):
         self.use_uni_match = use_uni_match
         self.uni_match_ind = uni_match_ind
         self.device = None
+        self.iou_type = iou_type
+        self.inner_ratio = inner_ratio
 
     def _get_loss_class(
         self, pred_scores: torch.Tensor, targets: torch.Tensor, gt_scores: torch.Tensor, num_gts: int, postfix: str = ""
@@ -147,7 +153,18 @@ class DETRLoss(nn.Module):
             return loss
 
         loss[name_bbox] = self.loss_gain["bbox"] * F.l1_loss(pred_bboxes, gt_bboxes, reduction="sum") / len(gt_bboxes)
-        loss[name_giou] = 1.0 - bbox_iou(pred_bboxes, gt_bboxes, xywh=True, GIoU=True)
+        loss[name_giou] = 1.0 - bbox_iou(
+            pred_bboxes,
+            gt_bboxes,
+            xywh=True,
+            GIoU=self.iou_type == "giou",
+            DIoU=self.iou_type == "diou",
+            CIoU=self.iou_type == "ciou",
+            SIoU=self.iou_type == "siou",
+            InnerIoU=self.iou_type == "inner_ciou",
+            InnerSIoU=self.iou_type == "inner_siou",
+            ratio=self.inner_ratio,
+        )
         loss[name_giou] = loss[name_giou].sum() / len(gt_bboxes)
         loss[name_giou] = self.loss_gain["giou"] * loss[name_giou]
         return {k: v.squeeze() for k, v in loss.items()}
