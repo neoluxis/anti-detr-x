@@ -70,7 +70,7 @@ def parse_args():
     parser.add_argument("--warmup_bias_lr", type=float, default=0.0, help="Warmup learning rate for bias parameters")
     parser.add_argument("--amp", action=argparse.BooleanOptionalAction, default=False, help="Enable automatic mixed precision")
     parser.add_argument("--fraction", type=float, default=1.0, help="Dataset fraction to use for training")
-    parser.add_argument("--cache", action="store_true", default=True, help="Cache images for faster training")
+    parser.add_argument("--cache", action=argparse.BooleanOptionalAction, default=True, help="Cache images for faster training")
     parser.add_argument("--workers", type=int, default=8, help="Number of workers for data loading")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
     parser.add_argument("--deterministic", action="store_true", default=False, help="Enable deterministic training for reproducibility")
